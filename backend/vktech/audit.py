@@ -145,6 +145,17 @@ def contextual_audit(gateway,scene,content,images):
     from PIL import Image,ImageDraw
     failures_only=os.environ.get('MODEL_AUDIT_MODE','failures')=='failures'
     schema=ContextualFailureReport if failures_only else ContextualReport
+    used_claims={cid for slide in scene.slides for node in slide.nodes for cid in node.claim_ids}
+    compact_content={'id':content.id,'title':content.title,'language':content.language,'claims':[c.model_dump() for c in content.claims if c.id in used_claims]}
+    compact_scene={'id':scene.id,'variant':scene.variant,'slides':[]}
+    for slide in scene.slides:
+        nodes=[]
+        for node in slide.nodes:
+            item={'id':node.id,'kind':node.kind,'role':node.role,'text':node.text,'claim_ids':node.claim_ids}
+            if node.kind in {'chart','table','smartart'}:item['data']=node.data
+            elif node.kind=='image':item['data']={'description':node.data.get('description',''),'source':node.data.get('source','')}
+            nodes.append(item)
+        compact_scene['slides'].append({'id':slide.id,'title':slide.title,'role':slide.role,'nodes':nodes})
     model_images=images
     with tempfile.TemporaryDirectory(prefix='vktech-audit-') as temp:
         if len(images)>1:
@@ -156,7 +167,7 @@ def contextual_audit(gateway,scene,content,images):
                 x=(index%cols)*width;y=(index//cols)*height
                 sheet.paste(thumb,(x,y+24));draw.rectangle((x,y,x+width,y+24),fill='white');draw.text((x+6,y+5),slide.id,fill='black')
             contact=Path(temp)/'contact-sheet.png';sheet.save(contact,'PNG',optimize=True);model_images=[contact]
-        report=gateway.structured('vision_audit',{'audit_mode':'failures_only' if failures_only else 'complete','visual_input':'One labeled contact sheet; labels are exact slide_id values.' if len(images)>1 else 'One slide image.','image_order':[s.id for s in scene.slides],'scene':scene.model_dump(),'content':content.model_dump(),'rules':{f'C{i:02}':name for i,name in enumerate(('Заголовок содержит вывод','Соответствие заголовку','Единая мысль','Факты из материалов','Есть содержание','Уместность изображений','Служебный мусор','Опечатки','Единый язык','Уместность данных','Связность соседних слайдов'),1)}},schema,model_images)
+        report=gateway.structured('vision_audit',{'audit_mode':'failures_only' if failures_only else 'complete','visual_input':'One labeled contact sheet; labels are exact slide_id values.' if len(images)>1 else 'One slide image.','image_order':[s.id for s in scene.slides],'scene':compact_scene,'content':compact_content,'rules':{f'C{i:02}':name for i,name in enumerate(('Заголовок содержит вывод','Соответствие заголовку','Единая мысль','Факты из материалов','Есть содержание','Уместность изображений','Служебный мусор','Опечатки','Единый язык','Уместность данных','Связность соседних слайдов'),1)}},schema,model_images)
     slides={s.id:s for s in scene.slides};seen=set();result=[]
     for item in report.issues:
         if item.rule not in {f'C{i:02}' for i in range(1,12)} or item.slide_id not in slides:raise ValueError('Contextual audit returned unknown rule or slide')

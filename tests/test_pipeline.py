@@ -3,11 +3,11 @@ import shutil
 import pytest
 from pptx import Presentation
 from vktech.template import import_template
-from vktech.planning import build_scenes,validate_plan
+from vktech.planning import build_scenes,validate_plan,plan_with_model,normalize_plan
 from vktech.export import export_pptx,export_html
 from vktech.opc import Package,NS
 from vktech.audit import audit_scene,repair_scene,contrast
-from vktech.contracts import RepairRequest
+from vktech.contracts import RepairRequest,GenerateRequest
 from vktech.store import Store,Job
 from vktech.worker import execute
 from conftest import FixtureGateway
@@ -33,11 +33,41 @@ def test_three_variants_native_objects(template_bytes,content,plan,tmp_path):
     assert len({tuple(s.prototype_id for s in sc.slides) for sc in scenes})==3
 
 
+def test_scene_uses_model_summary_with_source_traceability(template_bytes,content,plan):
+    concise=plan.model_copy(deep=True);concise.slides[0].message='Краткое изложение исходного факта'
+    scene=build_scenes(import_template(template_bytes),content,concise,'summary')[0]
+    body=next(n for n in scene.slides[0].nodes if n.role=='body')
+    assert body.text=='Краткое изложение исходного факта'
+    assert body.claim_ids==concise.slides[0].claim_ids
+
+
 def test_plan_cannot_drop_facts_or_invent_numbers(content,plan):
     broken=plan.model_copy(deep=True);broken.slides[-1].claim_ids=[]
     with pytest.raises(ValueError,match='omits'):validate_plan(broken,content,12)
     broken=plan.model_copy(deep=True);broken.slides[0].title='Рост 999%'
     with pytest.raises(ValueError,match='numbers'):validate_plan(broken,content,12)
+
+
+def test_incomplete_optional_visual_intent_is_removed(plan):
+    broken=plan.model_copy(deep=True);broken.slides[0].visual='image';broken.slides[0].asset_id=None
+    fixed=normalize_plan(broken)
+    assert fixed.slides[0].visual=='none'
+    assert fixed.slides[0].claim_ids==broken.slides[0].claim_ids
+
+
+def test_planner_retries_with_missing_claim_feedback(content,plan):
+    class Gateway:
+        def __init__(self):self.payloads=[]
+        def structured(self,role,payload,schema,images=None):
+            self.payloads.append(dict(payload))
+            if len(self.payloads)==1:
+                incomplete=plan.model_copy(deep=True);incomplete.slides[-1].claim_ids=[];return incomplete
+            return plan
+    gateway=Gateway();request=GenerateRequest(template_id='template',content_id='content',brief='test')
+    assert plan_with_model(gateway,content,request)==plan
+    assert len(gateway.payloads)==2
+    assert 'omits mandatory claims' in gateway.payloads[1]['validation_feedback']
+    assert set(gateway.payloads[0]['required_claim_ids'])=={c.id for c in content.claims if c.required}
 
 
 def test_selected_repair_is_versioned(template_bytes,content,plan):

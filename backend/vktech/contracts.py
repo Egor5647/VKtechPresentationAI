@@ -85,6 +85,8 @@ class Asset(Contract):
     description: str
     source: str
     media_type: Literal["image/png", "image/jpeg", "image/webp"] = "image/png"
+    claim_ids: list[str] = Field(default_factory=list)
+    purpose: Literal["output", "reference"] = "output"
 
 
 class ContentIR(Contract):
@@ -105,8 +107,8 @@ class ContentIR(Contract):
 
 class PlanSlide(Contract):
     id: str
-    title: str
-    message: str
+    title: str = Field(min_length=1, max_length=100)
+    message: str = Field(min_length=1, max_length=240)
     claim_ids: list[str]
     dataset_id: str | None = None
     asset_id: str | None = None

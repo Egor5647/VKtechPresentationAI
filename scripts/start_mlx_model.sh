@@ -21,8 +21,8 @@ exec "$VENV/bin/python" -m mlx_vlm.server \
   --host 127.0.0.1 \
   --port "${MODEL_PORT:-8001}" \
   --model "$MODEL" \
-  --max-tokens 10000 \
+  --max-tokens "${MODEL_SERVER_MAX_TOKENS:-4096}" \
   --max-num-seqs 1 \
   --kv-bits 8 \
-  --vision-cache-size 3 \
+  --vision-cache-size "${MODEL_VISION_CACHE_SIZE:-1}" \
   --log-progress-interval 100

@@ -83,10 +83,14 @@ async def asset(file:UploadFile):
 
 @app.post('/api/content')
 async def content(file:UploadFile):
-    data=await uploaded(file);content=import_content(data,file.filename or 'content.txt')
+    data=await uploaded(file);name=file.filename or 'content.txt'
+    def save_embedded(raw,asset_name,extension):
+        rid=store().save_record('asset',asset_name,raw,{},extension)
+        return store().record(rid,'asset').path
+    content=import_content(data,name,save_embedded if name.lower().endswith('.pptx') else None)
     allowed={r.path for r in store().records('asset')}
     if any(a.path not in allowed for a in content.assets):raise ValueError('Upload image assets first; use only returned asset paths')
-    rid=store().save_record('content',file.filename or 'content',data,content.model_dump(),'bin')
+    rid=store().save_record('content',name,data,content.model_dump(),'bin')
     return {'id':rid,'content':content.model_dump()}
 
 

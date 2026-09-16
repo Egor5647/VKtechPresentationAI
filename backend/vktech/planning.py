@@ -1,11 +1,22 @@
 from __future__ import annotations
 import hashlib
+import os
 import re
+from .settings import artifact_path
 from .contracts import PresentationPlan, ContentIR, DesignIR, SceneIR, SceneSlide, Node, Style, Box
 
 
 class NeedsInput(ValueError):
     pass
+
+
+def normalize_plan(plan: PresentationPlan) -> PresentationPlan:
+    """Remove incomplete optional visual intents without changing sourced claims."""
+    result=plan.model_copy(deep=True)
+    for slide in result.slides:
+        if slide.visual=='image' and not slide.asset_id:slide.visual='none'
+        if slide.visual in {'chart','table'} and not slide.dataset_id:slide.visual='none'
+    return result
 
 
 def validate_plan(plan: PresentationPlan, content: ContentIR, count: int):
@@ -29,9 +40,52 @@ def validate_plan(plan: PresentationPlan, content: ContentIR, count: int):
 
 
 def plan_with_model(gateway,content,request):
-    plan=gateway.structured('planning',{'content':content.model_dump(),'brief':request.brief,'purpose':request.purpose,'slide_count':request.slide_count},PresentationPlan)
-    validate_plan(plan,content,request.slide_count)
-    return plan
+    import tempfile
+    from pathlib import Path
+    from PIL import Image,ImageDraw
+    claim_lengths={c.id:len(c.text) for c in content.claims}
+    required_set={c.id for c in content.claims if c.required}
+    candidates=[]
+    for asset in content.assets:
+        if asset.purpose!='output':continue
+        path=artifact_path(asset.path)
+        if not path.exists():continue
+        shortest=min((claim_lengths.get(cid,10_000) for cid in asset.claim_ids),default=10_000)
+        candidates.append((shortest,path.stat().st_size,bool(set(asset.claim_ids)&required_set),asset,path))
+    limit=max(0,int(os.environ.get('MODEL_MAX_SOURCE_IMAGES','4')))
+    selected=sorted(candidates,key=lambda item:(item[0]>=80,-item[1],item[3].id))[:limit]
+    catalog_limit=max(limit,max(0,int(os.environ.get('MODEL_MAX_PLANNING_ASSETS','8'))))
+    catalog=sorted(candidates,key=lambda item:(not item[2],-item[1],item[3].id))[:catalog_limit]
+    planning_content=content.model_copy(deep=True)
+    planning_content.claims=[c for c in content.claims if c.required]
+    planning_assets={item[3].id:item[3] for item in catalog+selected}
+    planning_content.assets=list(planning_assets.values())
+    required=[c.id for c in content.claims if c.required]
+    payload={'content':planning_content.model_dump(),'brief':request.brief,'purpose':request.purpose,'slide_count':request.slide_count,'required_claim_ids':required,'source_image_order':[item[3].id for item in selected]}
+    with tempfile.TemporaryDirectory(prefix='vktech-source-') as temp:
+        model_images=[]
+        if selected:
+            width,height,cols=320,200,2;rows=(len(selected)+cols-1)//cols
+            sheet=Image.new('RGB',(width*cols,height*rows),'white');draw=ImageDraw.Draw(sheet)
+            for index,item in enumerate(selected):
+                with Image.open(item[4]) as source:
+                    thumb=source.convert('RGB');thumb.thumbnail((width-10,height-30),Image.Resampling.LANCZOS)
+                x=(index%cols)*width;y=(index//cols)*height
+                sheet.paste(thumb,(x+(width-thumb.width)//2,y+25));draw.text((x+5,y+5),item[3].id,fill='black')
+            contact=Path(temp)/'source-assets.png';sheet.save(contact,'PNG',optimize=True);model_images=[contact]
+            payload['visual_input']='One contact sheet. Labels are exact asset_id values from source_image_order.'
+        error=None
+        for attempt in range(2):
+            plan=normalize_plan(gateway.structured('planning',payload,PresentationPlan,images=model_images))
+            try:
+                validate_plan(plan,content,request.slide_count)
+                return plan
+            except ValueError as exc:
+                error=exc
+                if attempt==0:
+                    payload['validation_feedback']=str(exc)
+                    payload['correction']='Return a complete corrected plan. Every required_claim_id must occur in at least one slide.claim_ids.'
+        raise error
 
 
 def usable_prototypes(design):
@@ -62,7 +116,8 @@ def fit_node(node,design):
     from .audit import font_for
     from PIL import ImageFont
     from .settings import ROOT
-    for size in sorted({node.style.size}|{s for s in design.font_sizes if 10<=s<node.style.size},reverse=True):
+    sizes={node.style.size}|{s for s in design.font_sizes if 8<=s<node.style.size}|{8.0,9.0,10.0}
+    for size in sorted((s for s in sizes if s<=node.style.size),reverse=True):
         font=font_for(node.style.font,max(1,round(size*96/72)))
         if font is None:
             font=ImageFont.load_default(size=max(1,round(size*96/72)))
@@ -91,12 +146,9 @@ def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, j
             title=next(s for s in p.slots if s.role=='title')
             bodies=sorted(body_slots(p),key=lambda s:(s.box.y,s.box.x))
             nodes=[Node(id=f'{ps.id}-title',kind='text',role='title',box=title.box.model_copy(),style=title.style.model_copy(deep=True),text=ps.title,binding=title.id)]
-            texts=[claims[c].text for c in ps.claim_ids]
-            # Source claims are emitted verbatim until a verified paraphrase contract exists.
-            for i,slot in enumerate(bodies):
-                subset=[(cid,claims[cid].text) for j,cid in enumerate(ps.claim_ids) if j%len(bodies)==i]
-                if subset:
-                    nodes.append(Node(id=f'{ps.id}-body-{i+1}',kind='text',role='body',box=slot.box.model_copy(),style=slot.style.model_copy(deep=True),text='\n'.join(t for _,t in subset),claim_ids=[c for c,_ in subset],binding=slot.id))
+            texts=[part.strip() for part in re.split(r'\n+|(?<=[.!?])\s+',ps.message) if part.strip()] or [ps.message]
+            slot=max(bodies,key=lambda s:s.box.w*s.box.h)
+            nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=slot.box.model_copy(),style=slot.style.model_copy(deep=True),text=ps.message,claim_ids=ps.claim_ids,binding=slot.id))
             visual=ps.visual
             if ps.dataset_id: visual='table' if variant=='C' else 'chart'
             elif visual in {'sequence','list','hierarchy'} and variant=='A': visual='none'
