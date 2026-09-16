@@ -171,8 +171,25 @@ class AuditReport(Contract):
     issues: list[Issue]
 
 
+class ContextualFinding(Contract):
+    rule: Literal["C01", "C02", "C03", "C04", "C05", "C06", "C07", "C08", "C09", "C10", "C11"]
+    status: Literal["pass", "fail", "not_applicable"]
+    slide_id: str
+    element_ids: list[str] = Field(default_factory=list)
+    message: str = Field(min_length=20)
+    evidence: str = Field(min_length=10)
+
+
 class ContextualReport(Contract):
-    issues: list[Issue]
+    issues: list[ContextualFinding]
+
+
+class ContextualFailure(ContextualFinding):
+    status: Literal["fail"] = "fail"
+
+
+class ContextualFailureReport(Contract):
+    issues: list[ContextualFailure] = Field(max_length=12)
 
 
 class GenerateRequest(Contract):

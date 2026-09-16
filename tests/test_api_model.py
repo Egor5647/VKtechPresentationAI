@@ -25,7 +25,7 @@ def test_api_upload_job_and_artifact_access(template_bytes,content,tmp_path,monk
 
 
 def test_gateway_schema_retry_and_final_provider(plan,monkeypatch):
-    monkeypatch.setenv('MODEL_PROFILE','final');monkeypatch.setenv('VK_BASE_URL','https://vk.example/v1');monkeypatch.setenv('VK_MODEL_NAME','Qwen3.8-27B')
+    monkeypatch.setenv('MODEL_PROFILE','final');monkeypatch.setenv('VK_BASE_URL','https://vk.example/v1');monkeypatch.setenv('VK_MODEL_NAME','mlx-community/Qwen3-VL-4B-Instruct-4bit')
     calls=[]
     def handle(request):
         calls.append(request)
@@ -35,6 +35,9 @@ def test_gateway_schema_retry_and_final_provider(plan,monkeypatch):
     assert len(result.slides)==12 and len(calls)==2
     assert all(c['provider']=='vk' for c in gateway.calls)
     assert all(str(c.url)=='https://vk.example/v1/chat/completions' for c in calls)
+    body=json.loads(calls[-1].content)
+    assert body['response_format']['type']=='json_schema'
+    assert body['response_format']['json_schema']['schema']['title']=='PresentationPlan'
     with pytest.raises(ValueError):validate_manifest({'text':{'parameters':36_000_000_000,'license':'Apache-2.0','open_weights':True}})
 
 

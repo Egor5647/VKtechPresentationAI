@@ -3,7 +3,7 @@ import hashlib
 import re
 from pathlib import Path
 from PIL import ImageFont
-from .contracts import AuditReport, Issue, ContextualReport
+from .contracts import AuditReport, Issue, ContextualReport, ContextualFailureReport
 
 RULES={
  'D01':'Элемент вне слайда','D02':'Наложение блоков','D03':'Переполнение текста','D04':'Текст обрезан краем','D05':'Выравнивание по шаблону','D06':'Поля','D07':'Пропорции изображения','D08':'Гарнитуры','D09':'Типографическая шкала','D10':'Палитра','D11':'Происхождение композиции','D12':'Логотип и колонтитул','D13':'Контраст','D14':'Количество пунктов','D15':'Длина пункта','D16':'Размер таблицы','D17':'Количество серий','D18':'Заполнение слайда','D19':'Открываемость','D20':'Заглушки','D21':'Пустой слайд','D22':'Редактируемые объекты','D23':'Подписи диаграммы','D24':'Дублирование слайдов'}
@@ -139,7 +139,24 @@ def audit_scene(scene,design,content,opened=False):
 
 
 def contextual_audit(gateway,scene,content,images):
-    report=gateway.structured('vision_audit',{'scene':scene.model_dump(),'content':content.model_dump(),'rules':{f'C{i:02}':name for i,name in enumerate(('Заголовок содержит вывод','Соответствие заголовку','Единая мысль','Факты из материалов','Есть содержание','Уместность изображений','Служебный мусор','Опечатки','Единый язык','Уместность данных','Связность соседних слайдов'),1)}},ContextualReport,images)
+    import os
+    import tempfile
+    from pathlib import Path
+    from PIL import Image,ImageDraw
+    failures_only=os.environ.get('MODEL_AUDIT_MODE','failures')=='failures'
+    schema=ContextualFailureReport if failures_only else ContextualReport
+    model_images=images
+    with tempfile.TemporaryDirectory(prefix='vktech-audit-') as temp:
+        if len(images)>1:
+            width=448;height=252;cols=3;rows=(len(images)+cols-1)//cols
+            sheet=Image.new('RGB',(width*cols,height*rows),'white');draw=ImageDraw.Draw(sheet)
+            for index,(path,slide) in enumerate(zip(images,scene.slides)):
+                with Image.open(path) as source:
+                    thumb=source.convert('RGB');thumb.thumbnail((width,height-24),Image.Resampling.LANCZOS)
+                x=(index%cols)*width;y=(index//cols)*height
+                sheet.paste(thumb,(x,y+24));draw.rectangle((x,y,x+width,y+24),fill='white');draw.text((x+6,y+5),slide.id,fill='black')
+            contact=Path(temp)/'contact-sheet.png';sheet.save(contact,'PNG',optimize=True);model_images=[contact]
+        report=gateway.structured('vision_audit',{'audit_mode':'failures_only' if failures_only else 'complete','visual_input':'One labeled contact sheet; labels are exact slide_id values.' if len(images)>1 else 'One slide image.','image_order':[s.id for s in scene.slides],'scene':scene.model_dump(),'content':content.model_dump(),'rules':{f'C{i:02}':name for i,name in enumerate(('Заголовок содержит вывод','Соответствие заголовку','Единая мысль','Факты из материалов','Есть содержание','Уместность изображений','Служебный мусор','Опечатки','Единый язык','Уместность данных','Связность соседних слайдов'),1)}},schema,model_images)
     slides={s.id:s for s in scene.slides};seen=set();result=[]
     for item in report.issues:
         if item.rule not in {f'C{i:02}' for i in range(1,12)} or item.slide_id not in slides:raise ValueError('Contextual audit returned unknown rule or slide')
@@ -147,7 +164,7 @@ def contextual_audit(gateway,scene,content,images):
         if not set(item.element_ids)<=valid:raise ValueError('Contextual audit returned unknown element')
         if (item.rule,item.slide_id) in seen:raise ValueError('Duplicate contextual rule result')
         seen.add((item.rule,item.slide_id))
-        result.append(issue(scene,item.rule,slides[item.slide_id],item.element_ids,status=item.status,message=item.message,evidence=item.evidence,category='contextual'))
+        result.append(issue(scene,item.rule,slides[item.slide_id],item.element_ids,status=item.status,message=item.message,evidence={'model_observation':item.evidence},category='contextual'))
     # An omitted check is unknown, never a successful result.
     for slide in scene.slides:
         for i in range(1,12):

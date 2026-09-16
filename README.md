@@ -8,14 +8,16 @@
 ## Текущее состояние
 
 Работает полный программный путь: безопасный импорт PPTX, Design IR и Content IR,
-планирование через Qwen3.8-27B, три Scene IR, нативные текст, таблицы, графики и
+планирование через Qwen3-VL-4B-Instruct-4bit, три Scene IR, нативные текст, таблицы, графики и
 SmartArt, экспорты, превью, детерминированный и контекстуальный аудит, выбор
 исправлений и версионирование. Внешний инференс не заменяется тестовыми ответами:
 без настроенного endpoint задача переходит в `awaiting_input`.
 
 Контрольный прогон с явно синтетическим планом создаёт 3 × 3 колоды на трёх
 шаблонах. Он проверяет формат и рендер, но не служит демонстрацией качества модели.
-Для приёмочного прогона нужны реальный контент-пакет, endpoint модели и шрифты.
+Для приёмочного прогона нужен фактический материал будущей презентации. Под
+«контент-пакетом» здесь понимаются тема, тексты, факты, числа, таблицы, изображения
+и источники; это может быть один PPTX, PDF, документ или структурированный бриф.
 
 ## Быстрый запуск
 
@@ -40,6 +42,7 @@ python3.12 -m venv .venv
 cd frontend && pnpm install && pnpm run build && cd ..
 export DATABASE_URL='postgresql+psycopg://vktech:vktech@127.0.0.1:5432/vktech'
 export MODEL_BASE_URL='http://127.0.0.1:8001/v1'
+./scripts/start_mlx_model.sh
 .venv/bin/uvicorn vktech.api:app --host 127.0.0.1 --port 8000
 .venv/bin/python -m vktech.worker
 ```
@@ -51,24 +54,30 @@ TTF/OTF для точной проверки переноса текста. За
 
 ## Настройка моделей
 
-Режим отбора (`MODEL_PROFILE=selection`) использует OpenAI-совместимый endpoint:
+На Apple Silicon режим отбора (`MODEL_PROFILE=selection`) использует локальный
+OpenAI-совместимый сервер MLX-VLM. Веса размером около 3,1 GB скачиваются при
+первом запуске в кеш Hugging Face:
 
 ```dotenv
-MODEL_BASE_URL=https://provider.example/v1
-MODEL_API_KEY=...
-MODEL_NAME=Qwen/Qwen3.8-27B
+MODEL_BASE_URL=http://127.0.0.1:8001/v1
+MODEL_API_KEY=
+MODEL_NAME=mlx-community/Qwen3-VL-4B-Instruct-4bit
+MODEL_TIMEOUT_SECONDS=300
 ```
 
-Финальный режим (`MODEL_PROFILE=final`) требует инференс VK:
+Финальный режим (`MODEL_PROFILE=final`) требует предоставленный VK endpoint и
+доступный на нём model ID. После получения доступа этот ID добавляется в список
+разрешённых aliases в `config/models.yaml` и проверяется отдельным прогоном:
 
 ```dotenv
 VK_BASE_URL=https://vk.example/v1
 VK_API_KEY=...
-VK_MODEL_NAME=Qwen3.8-27B
+VK_MODEL_NAME=<approved-vk-model-id>
 ```
 
 Ключи хранятся только в `.env`, файл исключён из Git. Если протокол VK отличается
-от OpenAI Chat Completions, потребуется отдельный транспорт в `model.py`.
+от OpenAI Chat Completions с `json_schema`, потребуется отдельный транспорт в
+`model.py`.
 
 Для генерации изображения задаются `T2I_BASE_URL` и `T2I_API_KEY`. Endpoint должен
 возвращать base64 PNG/JPEG/WebP от модели Z-Image-Turbo. Пользователь может
@@ -100,7 +109,9 @@ cd frontend && pnpm run build
 ## Ограничения
 
 - Серверный рендер LibreOffice может отличаться от PowerPoint при отсутствии
-  корпоративных шрифтов. Аудит возвращает `unknown`, а не ложный `pass`.
+  корпоративных шрифтов. В предоставленных материалах отдельных файлов шрифтов
+  нет: используются системные шрифты и настройки PPTX, а аудит возвращает
+  `unknown` при невозможности подтвердить метрики.
 - Контекстуальный аудит зависит от vision-возможностей настроенного Qwen endpoint.
 - Настоящий SmartArt проверен в Microsoft PowerPoint: PowerPoint показывает вкладку
   «Конструктор», позволяет добавлять фигуры и менять макет. LibreOffice отображает
@@ -110,5 +121,5 @@ cd frontend && pnpm run build
   объектного хранилища; текущая конфигурация слушает только localhost.
 
 Подробности: [ARCHITECTURE.md](ARCHITECTURE.md), [MODELS.md](MODELS.md),
-[AUDIT.md](AUDIT.md). Исходный проект архитектуры:
+[MODEL_BENCHMARK.md](MODEL_BENCHMARK.md), [AUDIT.md](AUDIT.md). Проект архитектуры:
 [VK_Tech_Architecture.docx](output/documents/VK_Tech_Architecture.docx).

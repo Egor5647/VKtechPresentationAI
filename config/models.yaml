@@ -1,11 +1,12 @@
 version: 1
 text:
-  repository: Qwen/Qwen3.8-27B
-  revision: 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
-  parameters: 27781427952
+  repository: mlx-community/Qwen3-VL-4B-Instruct-4bit
+  revision: 2fd8dacbdb8f1e54b8c005f081ec5bf79c56376b
+  parameters: 4437815808
   license: Apache-2.0
   open_weights: true
   roles: [planning, vision_audit]
+  aliases: [Qwen/Qwen3-VL-4B-Instruct]
 image:
   repository: Tongyi-MAI/Z-Image-Turbo
   revision: f332072aa78be7aecdf3ee76d5c247082da564a6

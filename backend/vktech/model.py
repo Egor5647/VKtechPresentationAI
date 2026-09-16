@@ -1,6 +1,7 @@
 """OpenAI-compatible gateway for approved open-weight models; no silent fallback."""
 from __future__ import annotations
 import base64
+import io
 import json
 import os
 import time
@@ -12,6 +13,18 @@ from .settings import ROOT, config
 
 class ModelUnavailable(RuntimeError):
     pass
+
+
+def encoded_image(path: Path) -> str:
+    """Bound vision tokens while retaining enough slide detail for layout review."""
+    from PIL import Image
+    limit = int(os.environ.get("MODEL_IMAGE_MAX_EDGE", "896"))
+    with Image.open(path) as source:
+        image = source.convert("RGB")
+        image.thumbnail((limit, limit), Image.Resampling.LANCZOS)
+        buffer = io.BytesIO()
+        image.save(buffer, "PNG", optimize=True)
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
 
 
 def validate_manifest(manifest):
@@ -30,10 +43,11 @@ class ModelGateway:
         final = self.profile == "final"
         self.url = os.environ.get("VK_BASE_URL" if final else "MODEL_BASE_URL", "").rstrip("/")
         self.key = os.environ.get("VK_API_KEY" if final else "MODEL_API_KEY", "")
-        self.model = os.environ.get("VK_MODEL_NAME" if final else "MODEL_NAME", "Qwen3.8-27B" if final else self.manifest["text"]["repository"])
-        approved = {"Qwen3.8-27B", "Qwen/Qwen3.8-27B"}
-        if self.model not in approved: raise ValueError("MODEL_NAME must identify the approved Qwen3.8-27B model")
-        self.client = client or httpx.Client(timeout=httpx.Timeout(65, connect=10))
+        self.model = os.environ.get("VK_MODEL_NAME" if final else "MODEL_NAME", self.manifest["text"]["repository"])
+        approved = {self.manifest["text"]["repository"], *self.manifest["text"].get("aliases", [])}
+        if self.model not in approved: raise ValueError("MODEL_NAME must identify a model approved in config/models.yaml")
+        timeout = float(os.environ.get("MODEL_TIMEOUT_SECONDS", "300"))
+        self.client = client or httpx.Client(timeout=httpx.Timeout(timeout, connect=10))
         self.calls = []
 
     def structured(self, role: str, payload: dict, schema: type[BaseModel], images: list[Path] | None = None):
@@ -42,12 +56,13 @@ class ModelGateway:
         prompt = (ROOT / "prompts" / ("plan.txt" if role == "planning" else "audit.txt")).read_text()
         content = [{"type":"text", "text":json.dumps({"data":payload,"output_schema":schema.model_json_schema()},ensure_ascii=False)}]
         for p in images or []:
-            content.append({"type":"image_url", "image_url":{"url":"data:image/png;base64,"+base64.b64encode(p.read_bytes()).decode()}})
+            content.append({"type":"image_url", "image_url":{"url":encoded_image(p)}})
         headers = {"Authorization":"Bearer "+self.key} if self.key else {}
         error = None
         for attempt in range(2):
             started = time.monotonic()
-            response = self.client.post(self.url+"/chat/completions",headers=headers,json={"model":self.model,"messages":[{"role":"system","content":prompt},{"role":"user","content":content}],"temperature":0.2,"max_tokens":10000,"response_format":{"type":"json_object"}})
+            max_tokens = int(os.environ.get("MODEL_MAX_TOKENS_" + role.upper(), "3000" if role == "planning" else "2500"))
+            response = self.client.post(self.url+"/chat/completions",headers=headers,json={"model":self.model,"messages":[{"role":"system","content":prompt},{"role":"user","content":content}],"temperature":0.2,"max_tokens":max_tokens,"response_format":{"type":"json_schema","json_schema":{"name":role,"strict":True,"schema":schema.model_json_schema()}}})
             self.calls.append({"role":role,"provider":"vk" if self.profile=="final" else "configured_endpoint","model":self.model,"seconds":round(time.monotonic()-started,3),"status_code":response.status_code,"attempt":attempt+1})
             response.raise_for_status()
             raw=response.json()["choices"][0]["message"]["content"]
