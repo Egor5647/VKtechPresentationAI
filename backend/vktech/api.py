@@ -52,7 +52,10 @@ async def uploaded(file):
 @app.get('/api/health')
 def health():
     import shutil
-    return {'status':'ok','profile':os.environ.get('MODEL_PROFILE','selection'),'model_configured':bool(os.environ.get('VK_BASE_URL' if os.environ.get('MODEL_PROFILE')=='final' else 'MODEL_BASE_URL')),'renderer_available':bool(shutil.which(os.environ.get('SOFFICE','soffice'))),'database':store().engine.dialect.name}
+    from .model import configured_text_model
+    manifest=config('models.yaml');mode=os.environ.get('MODEL_MODE',manifest['text']['default_mode']);selected=configured_text_model(manifest,mode)
+    final=os.environ.get('MODEL_PROFILE')=='final';name=os.environ.get('VK_MODEL_NAME' if final else 'MODEL_NAME') or selected['repository']
+    return {'status':'ok','profile':os.environ.get('MODEL_PROFILE','selection'),'model_mode':mode,'model_name':name,'model_configured':bool(os.environ.get('VK_BASE_URL' if final else 'MODEL_BASE_URL')),'renderer_available':bool(shutil.which(os.environ.get('SOFFICE','soffice'))),'database':store().engine.dialect.name}
 
 
 @app.post('/api/templates')

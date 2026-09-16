@@ -8,7 +8,7 @@
 ## Текущее состояние
 
 Работает полный программный путь: безопасный импорт PPTX, Design IR и Content IR,
-планирование через Qwen3-VL-4B-Instruct-4bit, три Scene IR, нативные текст, таблицы, графики и
+планирование в переключаемом режиме `quality`/`fast`, три Scene IR, нативные текст, таблицы, графики и
 SmartArt, экспорты, превью, детерминированный и контекстуальный аудит, выбор
 исправлений и версионирование. Внешний инференс не заменяется тестовыми ответами:
 без настроенного endpoint задача переходит в `awaiting_input`.
@@ -42,6 +42,7 @@ python3.12 -m venv .venv
 cd frontend && pnpm install && pnpm run build && cd ..
 export DATABASE_URL='postgresql+psycopg://vktech:vktech@127.0.0.1:5432/vktech'
 export MODEL_BASE_URL='http://127.0.0.1:8001/v1'
+export MODEL_MODE=quality  # quality: Ministral 14B; fast: Qwen 4B
 ./scripts/start_mlx_model.sh
 .venv/bin/uvicorn vktech.api:app --host 127.0.0.1 --port 8000
 .venv/bin/python -m vktech.worker
@@ -55,15 +56,25 @@ TTF/OTF для точной проверки переноса текста. За
 ## Настройка моделей
 
 На Apple Silicon режим отбора (`MODEL_PROFILE=selection`) использует локальный
-OpenAI-совместимый сервер MLX-VLM. Веса размером около 3,1 GB скачиваются при
-первом запуске в кеш Hugging Face:
+OpenAI-совместимый сервер MLX-VLM. `quality` выбран по умолчанию; смена режима
+требует перезапуска model server и того же значения `MODEL_MODE` у worker:
 
 ```dotenv
 MODEL_BASE_URL=http://127.0.0.1:8001/v1
 MODEL_API_KEY=
-MODEL_NAME=mlx-community/Qwen3-VL-4B-Instruct-4bit
+MODEL_MODE=quality
+MODEL_NAME=
 MODEL_TIMEOUT_SECONDS=300
 ```
+
+| Режим | Модель | Локальные веса | Полный прогон |
+| --- | --- | --- | --- |
+| `quality` | Ministral 3 14B Instruct 4-bit | около 8,42 GB | 222,993 с |
+| `fast` | Qwen3-VL-4B Instruct 4-bit | около 3,09 GB | 99,176 с |
+
+Оба замера включают три варианта по 12 слайдов, PPTX/PDF/HTML и vision-аудит и
+выполнены на синтетическом fixture. Название `quality` обозначает основной профиль;
+превосходство по качеству должно быть подтверждено на размеченном реальном наборе.
 
 Финальный режим (`MODEL_PROFILE=final`) требует предоставленный VK endpoint и
 доступный на нём model ID. После получения доступа этот ID добавляется в список

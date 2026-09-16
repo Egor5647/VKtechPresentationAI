@@ -4,7 +4,13 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 VENV="$ROOT/.mlx-venv"
 PYTHON=${PYTHON:-"$ROOT/.venv/bin/python"}
-MODEL=${MODEL_NAME:-mlx-community/Qwen3-VL-4B-Instruct-4bit}
+MODE=${MODEL_MODE:-quality}
+case "$MODE" in
+  fast) DEFAULT_MODEL=mlx-community/Qwen3-VL-4B-Instruct-4bit ;;
+  quality) DEFAULT_MODEL=mlx-community/Ministral-3-14B-Instruct-2512-4bit ;;
+  *) echo "MODEL_MODE must be fast or quality" >&2; exit 2 ;;
+esac
+MODEL=${MODEL_NAME:-$DEFAULT_MODEL}
 
 if [ ! -x "$VENV/bin/python" ]; then
   "$PYTHON" -m venv "$VENV"
