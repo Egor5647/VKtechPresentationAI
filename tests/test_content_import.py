@@ -36,3 +36,17 @@ def test_pptx_content_groups_slides_notes_and_embedded_assets(tmp_path):
     assert content.assets[0].claim_ids==['claim-slide-2']
     assert content.assets[0].media_type=='image/png'
     assert saved[0][0].read_bytes()==raw.getvalue()
+
+
+def test_pdf_content_uses_pages_as_optional_source_units(monkeypatch):
+    class Page:
+        def __init__(self,text):self.text=text
+        def extract_text(self):return self.text
+    class Reader:
+        pages=[Page('Заголовок\nПервая строка\nПервая строка'),Page('Вторая страница')]
+    monkeypatch.setattr('pypdf.PdfReader',lambda stream:Reader())
+    content=import_content(b'%PDF-test','notes.pdf')
+    assert len(content.claims)==2
+    assert content.claims[0].text=='Заголовок\nПервая строка'
+    assert content.claims[0].source=='notes.pdf#page=1'
+    assert all(not claim.required for claim in content.claims)

@@ -55,7 +55,7 @@ def health():
     from .model import configured_text_model
     manifest=config('models.yaml');mode=os.environ.get('MODEL_MODE',manifest['text']['default_mode']);selected=configured_text_model(manifest,mode)
     final=os.environ.get('MODEL_PROFILE')=='final';name=os.environ.get('VK_MODEL_NAME' if final else 'MODEL_NAME') or selected['repository']
-    return {'status':'ok','profile':os.environ.get('MODEL_PROFILE','selection'),'model_mode':mode,'model_name':name,'model_configured':bool(os.environ.get('VK_BASE_URL' if final else 'MODEL_BASE_URL')),'renderer_available':bool(shutil.which(os.environ.get('SOFFICE','soffice'))),'database':store().engine.dialect.name}
+    return {'status':'ok','profile':os.environ.get('MODEL_PROFILE','selection'),'model_mode':mode,'model_name':name,'model_configured':bool(os.environ.get('VK_BASE_URL' if final else 'MODEL_BASE_URL')),'image_model_configured':bool(os.environ.get('T2I_BASE_URL')),'renderer_available':bool(shutil.which(os.environ.get('SOFFICE','soffice'))),'database':store().engine.dialect.name}
 
 
 @app.post('/api/templates')
@@ -101,6 +101,8 @@ def contents():return [{'id':r.id,'name':r.name,'content':json.loads(r.document)
 @app.post('/api/jobs',status_code=202)
 def generate(request:GenerateRequest):
     store().record(request.template_id,'template');store().record(request.content_id,'content')
+    if request.generate_images and not os.environ.get('T2I_BASE_URL'):
+        raise ValueError('Генерация новых иллюстраций недоступна: T2I endpoint не настроен. Снимите этот флажок.')
     return {'id':store().enqueue('generate',request.model_dump())}
 
 

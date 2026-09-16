@@ -128,7 +128,15 @@ def import_content(data: bytes, filename: str, asset_writer: AssetWriter | None 
         from pypdf import PdfReader
         paragraphs=[]
         for i,page in enumerate(PdfReader(io.BytesIO(data)).pages):
-            paragraphs.extend((line.strip(),f'{filename}#page={i+1}') for line in (page.extract_text() or '').splitlines() if line.strip())
+            # A PDF text extractor often returns one line per drawing operation. Treating
+            # every line as a claim adds hundreds of repeated JSON objects and can exhaust
+            # a local model's KV cache before generation starts. A page is the stable source
+            # unit and remains small enough for provenance and later selection by the brief.
+            lines=[]
+            for raw in (page.extract_text() or '').splitlines():
+                line=_clean_text(raw)
+                if line and line not in lines:lines.append(line)
+            if lines:paragraphs.append(('\n'.join(lines),f'{filename}#page={i+1}'))
     elif ext in {'txt','md'}:
         paragraphs=[(line.strip().lstrip('# ').strip(),f'{filename}#line={i+1}') for i,line in enumerate(data.decode('utf-8-sig').splitlines()) if line.strip()]
     elif ext=='csv':
@@ -137,4 +145,5 @@ def import_content(data: bytes, filename: str, asset_writer: AssetWriter | None 
         series={h:[float(r[i]) for r in rows[1:]] for i,h in enumerate(rows[0]) if i>0}
         return ContentIR(id=digest,title=filename,claims=[],datasets=[Dataset(id='data-1',title=filename,categories=[r[0] for r in rows[1:]],series=series,unit='значение',source=filename)])
     else: raise ValueError('Supported content formats: JSON, PPTX, TXT, MD, PDF, CSV')
-    return ContentIR(id=digest,title=filename,claims=[Claim(id=f'claim-{i+1}',text=t,source=s) for i,(t,s) in enumerate(paragraphs)])
+    optional=ext=='pdf'
+    return ContentIR(id=digest,title=filename,claims=[Claim(id=f'claim-{i+1}',text=t,source=s,required=not optional) for i,(t,s) in enumerate(paragraphs)])

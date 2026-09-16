@@ -1,13 +1,40 @@
 from __future__ import annotations
 import hashlib
+import logging
 import os
 import re
 from .settings import artifact_path
 from .contracts import PresentationPlan, ContentIR, DesignIR, SceneIR, SceneSlide, Node, Style, Box
 
+log=logging.getLogger(__name__)
+
 
 class NeedsInput(ValueError):
     pass
+
+
+def planning_claims(content: ContentIR, brief: str) -> list:
+    """Bound model context while retaining every explicitly mandatory claim."""
+    limit=max(1,int(os.environ.get('MODEL_MAX_PLANNING_CLAIMS','32')))
+    char_limit=max(1000,int(os.environ.get('MODEL_MAX_PLANNING_CHARS','18000')))
+    required=[claim for claim in content.claims if claim.required]
+    required_chars=sum(len(claim.text) for claim in required)
+    if len(required)>limit or required_chars>char_limit:
+        raise NeedsInput(
+            f'Исходные материалы содержат {len(required)} обязательных блоков объёмом {required_chars} символов. '
+            'Разделите документ или отметьте второстепенные разделы как необязательные.'
+        )
+    terms=set(re.findall(r'[\w+#<>]{3,}',brief.lower()))
+    def rank(claim):
+        words=set(re.findall(r'[\w+#<>]{3,}',claim.text.lower()))
+        return (-len(words&terms),len(claim.text),claim.source,claim.id)
+    selected=list(required);used={claim.id for claim in selected};chars=required_chars
+    for claim in sorted((c for c in content.claims if c.id not in used),key=rank):
+        if len(selected)>=limit:break
+        if chars+len(claim.text)>char_limit:continue
+        selected.append(claim);chars+=len(claim.text)
+    if not selected and content.claims:selected=[min(content.claims,key=lambda c:(len(c.text),c.id))]
+    return selected
 
 
 def normalize_plan(plan: PresentationPlan) -> PresentationPlan:
@@ -57,7 +84,7 @@ def plan_with_model(gateway,content,request):
     catalog_limit=max(limit,max(0,int(os.environ.get('MODEL_MAX_PLANNING_ASSETS','8'))))
     catalog=sorted(candidates,key=lambda item:(not item[2],-item[1],item[3].id))[:catalog_limit]
     planning_content=content.model_copy(deep=True)
-    planning_content.claims=[c for c in content.claims if c.required]
+    planning_content.claims=planning_claims(content,request.brief)
     planning_assets={item[3].id:item[3] for item in catalog+selected}
     planning_content.assets=list(planning_assets.values())
     required=[c.id for c in content.claims if c.required]
@@ -80,8 +107,11 @@ def plan_with_model(gateway,content,request):
             try:
                 validate_plan(plan,content,request.slide_count)
                 return plan
+            except NeedsInput:
+                raise
             except ValueError as exc:
                 error=exc
+                log.warning('Planning validation attempt %s failed: %s',attempt+1,exc)
                 if attempt==0:
                     payload['validation_feedback']=str(exc)
                     payload['correction']='Return a complete corrected plan. Every required_claim_id must occur in at least one slide.claim_ids.'

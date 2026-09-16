@@ -3,7 +3,7 @@ import shutil
 import pytest
 from pptx import Presentation
 from vktech.template import import_template
-from vktech.planning import build_scenes,validate_plan,plan_with_model,normalize_plan
+from vktech.planning import NeedsInput,build_scenes,validate_plan,plan_with_model,normalize_plan,planning_claims
 from vktech.export import export_pptx,export_html
 from vktech.opc import Package,NS
 from vktech.audit import audit_scene,repair_scene,contrast
@@ -68,6 +68,24 @@ def test_planner_retries_with_missing_claim_feedback(content,plan):
     assert len(gateway.payloads)==2
     assert 'omits mandatory claims' in gateway.payloads[1]['validation_feedback']
     assert set(gateway.payloads[0]['required_claim_ids'])=={c.id for c in content.claims if c.required}
+
+
+def test_planner_does_not_retry_a_model_request_for_missing_input(content):
+    class Gateway:
+        def __init__(self):self.calls=0
+        def structured(self,role,payload,schema,images=None):
+            self.calls+=1
+            return schema(status='needs_input',reason='Нужны исходные данные',slides=[])
+    gateway=Gateway();request=GenerateRequest(template_id='template',content_id='content',brief='test')
+    with pytest.raises(NeedsInput,match='Нужны исходные данные'):
+        plan_with_model(gateway,content,request)
+    assert gateway.calls==1
+
+
+def test_planning_context_rejects_unbounded_required_claims(content,monkeypatch):
+    monkeypatch.setenv('MODEL_MAX_PLANNING_CLAIMS','1')
+    with pytest.raises(NeedsInput,match='обязательных блоков'):
+        planning_claims(content,'краткий бриф')
 
 
 def test_selected_repair_is_versioned(template_bytes,content,plan):
