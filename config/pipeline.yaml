@@ -1,0 +1,13 @@
+version: 1
+slide_count: 12
+deadline_seconds: 300
+variants:
+  - {id: A, label: Последовательное изложение, composition: sequential}
+  - {id: B, label: Визуальное объяснение, composition: visual}
+  - {id: C, label: Сравнения и показатели, composition: comparison}
+brand_conflict_policy: effective_pptx
+smartart: native
+max_upload_bytes: 104857600
+max_archive_bytes: 536870912
+max_archive_entries: 10000
+repair_attempts: 2

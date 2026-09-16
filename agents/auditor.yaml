@@ -1,0 +1,5 @@
+id: contextual_auditor
+version: 1.0.0
+prompt: prompts/audit.txt
+model_role: vision_audit
+output_schema: ContextualReport

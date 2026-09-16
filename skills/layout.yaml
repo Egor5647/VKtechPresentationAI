@@ -1,0 +1,5 @@
+id: template_layout
+version: 1.0.0
+inputs: [design_ir, presentation_plan]
+outputs: [scene_ir]
+policy: preserve_template_geometry_and_protected_objects

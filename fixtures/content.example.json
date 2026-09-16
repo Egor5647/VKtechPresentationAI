@@ -1,0 +1,20 @@
+{
+  "id": "example",
+  "title": "Демонстрационный контент: цифровой дизайнер",
+  "language": "ru",
+  "claims": [
+    {"id":"c1","text":"Демонстрационный набор содержит вымышленные данные для проверки сервиса.","source":"synthetic fixture"},
+    {"id":"c2","text":"Пользователь загружает фирменный шаблон PPTX.","source":"synthetic fixture"},
+    {"id":"c3","text":"Исходные материалы передаются отдельным контент-пакетом.","source":"synthetic fixture"},
+    {"id":"c4","text":"План содержания формируется до вёрстки.","source":"synthetic fixture"},
+    {"id":"c5","text":"Три варианта используют одинаковый набор фактов.","source":"synthetic fixture"},
+    {"id":"c6","text":"Графики строятся из числовых данных исходного пакета.","source":"synthetic fixture"},
+    {"id":"c7","text":"Детерминированные проверки анализируют объекты и координаты.","source":"synthetic fixture"},
+    {"id":"c8","text":"Контекстуальные проверки анализируют содержание и изображения слайдов.","source":"synthetic fixture"},
+    {"id":"c9","text":"Пользователь выбирает замечания для исправления.","source":"synthetic fixture"},
+    {"id":"c10","text":"Исправления сохраняются новой версией презентации.","source":"synthetic fixture"},
+    {"id":"c11","text":"PPTX содержит редактируемые текстовые объекты, таблицы и диаграммы.","source":"synthetic fixture"},
+    {"id":"c12","text":"Итоговая презентация экспортируется в HTML, PPTX и PDF.","source":"synthetic fixture"}
+  ],
+  "datasets": [{"id":"metrics","title":"Тестовые значения","categories":["A","B","C"],"series":{"Пример":[20,40,60]},"unit":"условные единицы","source":"synthetic fixture; not business evidence"}]
+}

@@ -1,0 +1,5 @@
+id: presentation_planner
+version: 1.0.0
+prompt: prompts/plan.txt
+model_role: planning
+output_schema: PresentationPlan

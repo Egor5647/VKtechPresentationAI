@@ -1,0 +1,36 @@
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: vktech
+      POSTGRES_USER: vktech
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vktech}
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: ["postgres:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vktech"]
+      interval: 5s
+      retries: 10
+  api:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://vktech:${POSTGRES_PASSWORD:-vktech}@db:5432/vktech
+      DATA_DIR: /app/data
+    ports: ["127.0.0.1:8000:8000"]
+    volumes: ["artifacts:/app/data"]
+    depends_on:
+      db: {condition: service_healthy}
+  worker:
+    build: .
+    command: ["python", "-m", "vktech.worker"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://vktech:${POSTGRES_PASSWORD:-vktech}@db:5432/vktech
+      DATA_DIR: /app/data
+    volumes: ["artifacts:/app/data"]
+    depends_on:
+      db: {condition: service_healthy}
+volumes:
+  postgres:
+  artifacts:
