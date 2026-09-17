@@ -9,6 +9,7 @@ data/
 frontend/dist/
 tmp/
 output/
+.local/
 *.egg-info/
 *.log
 *.tsbuildinfo

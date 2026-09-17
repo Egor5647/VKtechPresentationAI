@@ -30,37 +30,42 @@
 
 ## Быстрый запуск
 
-Требуются Docker с Compose и не менее 8 CPU, 16 GB RAM и 20 GB свободного места.
-GPU использует отдельный сервер инференса; контейнеры приложения не включают веса.
+Основной локальный сценарий рассчитан на Mac с Apple Silicon. Понадобятся Homebrew
+и не менее 20 GB свободного места. Веса моделей хранятся в кэше Hugging Face и
+никогда не добавляются в Git.
 
 ```bash
-cp .env.example .env
-# Укажите MODEL_BASE_URL или параметры VK для финального профиля.
+make setup
+make download-qwen
+make download-ministral
+make download-zimage
+make run
+```
+
+`make run` одной командой запускает выбранную текстовую модель, Z-Image, API,
+worker и собранный веб-интерфейс, после чего открывает `http://127.0.0.1:8000`.
+По умолчанию используется качественный режим Ministral. Быстрый режим запускается
+так:
+
+```bash
+MODEL_MODE=fast make run
+```
+
+Логи всех процессов находятся в `.local/logs`. Для остановки нажмите `Ctrl+C` в
+терминале с `make run`. Настройки можно изменить в `.env`, который создаётся из
+`.env.example` командой `make setup`.
+
+Контейнерный запуск приложения без локальных весов также поддерживается. Сначала
+укажите внешние model endpoints в `.env`, затем выполните:
+
+```bash
 docker compose up --build
 ```
 
-Откройте `http://127.0.0.1:8000`. API доступен на `/docs`. В отдельном процессе
-должен работать worker из `compose.yaml`. Артефакты лежат в volume `artifacts`,
-PostgreSQL — в volume `postgres`.
-
-Локальный запуск без Docker:
-
-```bash
-python3.12 -m venv .venv
-.venv/bin/pip install -e '.[test]'
-cd frontend && pnpm install && pnpm run build && cd ..
-export DATABASE_URL='postgresql+psycopg://vktech:vktech@127.0.0.1:5432/vktech'
-export MODEL_BASE_URL='http://127.0.0.1:8001/v1'
-export MODEL_MODE=quality  # quality: Ministral 14B; fast: Qwen 4B
-./scripts/start_mlx_model.sh
-.venv/bin/uvicorn vktech.api:app --host 127.0.0.1 --port 8000
-.venv/bin/python -m vktech.worker
-```
-
-Нужны `soffice` и `pdftoppm` в `PATH`; пути можно задать переменными `SOFFICE` и
-`PDFTOPPM`. `FONT_DIRS` содержит разделённые системным символом пути к доступным
-TTF/OTF для точной проверки переноса текста. Загруженные PPTX могут содержать
-встроенные шрифты, но это не гарантирует их доступность LibreOffice или браузеру.
+`make setup` устанавливает через Homebrew Python, Node.js, pnpm, Poppler и
+LibreOffice, если их ещё нет. Пути к `soffice` и `pdftoppm` можно переопределить
+переменными `SOFFICE` и `PDFTOPPM`. `FONT_DIRS` содержит разделённые системным
+символом пути к доступным TTF/OTF для точной проверки переноса текста.
 
 ## Настройка моделей
 
