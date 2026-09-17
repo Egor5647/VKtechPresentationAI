@@ -1,12 +1,12 @@
-import React, {useEffect, useMemo, useState} from 'react';
+import React, {useEffect, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import './style.css';
 
-type Issue={id:string;status:string;slide_id:string|null;message:string};
-type Scene={version:number;slides:{id:string;title:string}[]};
 type Export={version:number;scene:string;audit:string;pptx:string;html:string;pdf:string;previews:string[];issue_count:number};
 type Option={label:string;preview:string;score:number;reasons:Record<string,unknown>};
-type SlideChoice={id:string;title:string;archetype:string;lead:string;support_points:string[];takeaway:string;selected:'A'|'B'|'C';options:Record<'A'|'B'|'C',Option>};
+type Variant='A'|'B'|'C';
+type Format='pptx'|'pdf'|'html';
+type SlideChoice={id:string;title:string;archetype:string;lead:string;support_points:string[];takeaway:string;selected:Variant;options:Record<Variant,Option>};
 type Result={presentation?:Export;variants?:Record<string,Export>;slides?:SlideChoice[];selection?:Record<string,string>;elapsed_seconds?:number;deadline_met?:boolean};
 type Job={id:string;state:string;stage:string;error:string;result:Result};
 type Template={id:string;name:string;design:{prototypes:unknown[];fonts:string[];warnings:string[]}};
@@ -26,7 +26,8 @@ const fileURL=(job:string,path:string)=>`/api/jobs/${job}/file?path=${encodeURIC
 function App(){
   const [templates,setTemplates]=useState<Template[]>([]),[contents,setContents]=useState<Content[]>([]);
   const [template,setTemplate]=useState(''),[content,setContent]=useState(''),[brief,setBrief]=useState(''),[count,setCount]=useState(12),[purpose,setPurpose]=useState('project'),[images,setImages]=useState(true);
-  const [job,setJob]=useState<Job|null>(null),[scene,setScene]=useState<Scene|null>(null),[issues,setIssues]=useState<Issue[]>([]),[slide,setSlide]=useState(0),[instruction,setInstruction]=useState('Сделай слайд выразительнее и плотнее, сохрани все факты.');
+  const [job,setJob]=useState<Job|null>(null),[slide,setSlide]=useState(0),[instruction,setInstruction]=useState('Сделай слайд выразительнее и плотнее, сохрани все факты.');
+  const [draftSelection,setDraftSelection]=useState<Record<string,Variant>>({}),[exportTask,setExportTask]=useState<{id:string;format:Format}|null>(null);
   const [error,setError]=useState(''),[busy,setBusy]=useState(false),[health,setHealth]=useState<Health|null>(null);
 
   async function refresh(){
@@ -43,14 +44,18 @@ function App(){
     const timer=setInterval(()=>api<Job>('/api/jobs/'+job.id).then(next=>{setJob(next);if(!['queued','running'].includes(next.state))setBusy(false)}).catch(e=>{setError(e.message);setBusy(false)}),1500);
     return()=>clearInterval(timer);
   },[job?.id,job?.state]);
-  useEffect(()=>{if(job)localStorage.setItem('vktech-job',job.id)},[job?.id]);
   useEffect(()=>{
-    let active=true;setScene(null);setIssues([]);
-    const presentation=job?.result?.presentation;
-    if(!job||job.state!=='ready'||!presentation)return;
-    Promise.all([api<Scene>(fileURL(job.id,presentation.scene)),api<{issues:Issue[]}>(fileURL(job.id,presentation.audit))]).then(([nextScene,audit])=>{if(active){setScene(nextScene);setIssues(audit.issues);setSlide(current=>Math.min(current,nextScene.slides.length-1))}}).catch(e=>setError(e.message));
-    return()=>{active=false};
+    if(!job)return;localStorage.setItem('vktech-job',job.id);
+    if(job.state==='ready'&&job.result.selection){
+      setDraftSelection(job.result.selection as Record<string,Variant>);
+      setSlide(current=>Math.min(current,(job.result.slides?.length||1)-1));
+      const url=new URL(window.location.href);url.searchParams.set('job',job.id);window.history.replaceState({},'',url);
+    }
   },[job?.id,job?.state]);
+  useEffect(()=>{
+    if(!exportTask)return;let active=true;let timer=0;
+    const poll=async()=>{try{const next=await api<Job>('/api/jobs/'+exportTask.id);if(!active)return;if(next.state==='ready'&&next.result.presentation){setJob(next);const path=next.result.presentation[exportTask.format];const link=document.createElement('a');link.href=fileURL(next.id,path);link.download=`presentation.${exportTask.format}`;link.click();setExportTask(null)}else if(['failed','awaiting_input','cancelled'].includes(next.state)){setError(next.error||'Не удалось собрать файл');setExportTask(null)}else timer=window.setTimeout(poll,1200)}catch(e){if(active){setError((e as Error).message);setExportTask(null)}}};poll();return()=>{active=false;window.clearTimeout(timer)};
+  },[exportTask?.id]);
 
   async function upload(kind:'templates'|'content',file:File){
     setBusy(true);setError('');try{const body=new FormData();body.append('file',file);const result=await api<{id:string}>('/api/'+kind,{method:'POST',body});await refresh();kind==='templates'?setTemplate(result.id):setContent(result.id)}catch(e){setError((e as Error).message)}finally{setBusy(false)}
@@ -63,24 +68,29 @@ function App(){
     if(!job)return;setBusy(true);setError('');
     try{const created=await api<{id:string}>(`/api/jobs/${job.id}/${path}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});setJob(await api<Job>('/api/jobs/'+created.id))}catch(e){setError((e as Error).message);setBusy(false)}
   }
+  async function download(format:Format){
+    if(!job||!presentation)return;setError('');
+    const selection=Object.fromEntries(choices.map(choice=>[choice.id,draftSelection[choice.id]||choice.selected])) as Record<string,Variant>;
+    const changed=choices.some(choice=>selection[choice.id]!==choice.selected);
+    if(!changed){const link=document.createElement('a');link.href=fileURL(job.id,presentation[format]);link.download=`presentation.${format}`;link.click();return}
+    try{const created=await api<{id:string}>(`/api/jobs/${job.id}/export`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({selection})});setExportTask({id:created.id,format})}catch(e){setError((e as Error).message)}
+  }
+  const completeSelection=()=>Object.fromEntries(choices.map(choice=>[choice.id,draftSelection[choice.id]||choice.selected])) as Record<string,Variant>;
 
   const result=job?.result;
   const presentation=result?.presentation;
   const choices=result?.slides||[];
   const currentChoice=choices[slide];
-  const currentTemplate=templates.find(t=>t.id===template);
-  const currentIssues=useMemo(()=>issues.filter(i=>i.status==='fail'&&(i.slide_id===currentChoice?.id||!i.slide_id)),[issues,currentChoice?.id]);
   const legacyReady=job?.state==='ready'&&!presentation;
+  const selectedFor=(choice:SlideChoice):Variant=>draftSelection[choice.id]||choice.selected;
 
   return <div className="app">
-    <header><div className="logo">VK</div><div><b>Презентации</b><span>Цифровой дизайнер · VK Tech</span></div><div className="header-note">Одна презентация · варианты для каждого слайда</div></header>
+    <header><div className="logo">VK</div><div><b>Презентации</b></div></header>
     <main>
       <aside className="setup">
         <div className="eyebrow">НОВАЯ ПРЕЗЕНТАЦИЯ</div><h1>От материалов<br/>к готовым слайдам</h1>
-        <p className="muted">Сервис создаст структуру, подготовит три компоновки каждого слайда и сам соберёт лучший первый вариант.</p>
         <label>Шаблон PPTX<select value={template} onChange={e=>setTemplate(e.target.value)}><option value="">Выберите шаблон</option>{templates.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}</select></label>
         <label className="upload">＋ Загрузить шаблон<input type="file" accept=".pptx" disabled={busy} onChange={e=>{if(e.target.files?.[0])upload('templates',e.target.files[0]);e.target.value=''}}/></label>
-        {currentTemplate&&<div className="template-info">{currentTemplate.design.prototypes.length} композиций · {currentTemplate.design.fonts.join(', ')}{currentTemplate.design.warnings.map(w=><p key={w} className="notice">{w}</p>)}</div>}
         <label>Исходные материалы<select value={content} onChange={e=>setContent(e.target.value)}><option value="">Выберите материалы</option>{contents.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></label>
         <label className="upload">＋ Загрузить материалы<input type="file" accept=".json,.txt,.md,.pptx,.pdf,.csv" disabled={busy} onChange={e=>{if(e.target.files?.[0])upload('content',e.target.files[0]);e.target.value=''}}/></label>
         <label>Что должна объяснить презентация?<textarea value={brief} onChange={e=>setBrief(e.target.value)} placeholder="Например: объяснить пользу продукта руководителям и предложить следующий шаг" rows={4}/></label>
@@ -91,33 +101,31 @@ function App(){
       </aside>
       <section className="workspace">
         {error&&<div role="alert" className="error">{error}<button onClick={()=>setError('')}>×</button></div>}
-        {!job&&<div className="empty"><div className="empty-card"><div className="mock-title"/><div className="mock-line"/><div className="mock-line short"/><div className="mock-bars"><i/><i/><i/></div></div><h2>Здесь появится презентация</h2><p>Для каждого слайда можно выбрать компоновку<br/>или попросить сервис создать новые варианты.</p></div>}
+        {!job&&<div className="empty"><div className="empty-card"><div className="mock-title"/><div className="mock-line"/><div className="mock-line short"/><div className="mock-bars"><i/><i/><i/></div></div><h2>Здесь появится презентация</h2></div>}
         {job&&<>
-          <div className="status"><span className={'dot '+job.state}/><b>{stages[job.stage]||job.stage}</b>{job.state==='ready'&&<span>{result?.elapsed_seconds} с · {result?.deadline_met?'в пределах 5 минут':'дольше 5 минут'}</span>}{['queued','running'].includes(job.state)&&<button onClick={()=>api<Job>(`/api/jobs/${job.id}/cancel`,{method:'POST'}).then(setJob).catch(e=>setError(e.message))}>Отменить</button>}</div>
+          <div className="status"><span className={'dot '+job.state}/><b>{stages[job.stage]||job.stage}</b>{['queued','running'].includes(job.state)&&<button onClick={()=>api<Job>(`/api/jobs/${job.id}/cancel`,{method:'POST'}).then(setJob).catch(e=>setError(e.message))}>Отменить</button>}</div>
           {job.error&&<div className="error">{job.error}</div>}{['failed','awaiting_input'].includes(job.state)&&<button onClick={()=>api<Job>(`/api/jobs/${job.id}/retry`,{method:'POST'}).then(setJob).catch(e=>setError(e.message))}>Повторить после устранения причины</button>}
           {legacyReady&&<div className="notice-card">Этот результат создан старой версией сервиса. Нажмите «Создать презентацию», чтобы получить выбор вариантов для каждого слайда.</div>}
           {job.state==='ready'&&presentation&&currentChoice&&<>
-            <div className="result-head"><div><div className="eyebrow">ГОТОВАЯ ПРЕЗЕНТАЦИЯ</div><h2>{choices.length} слайдов · варианты выбраны автоматически</h2></div><div className="exports">{(['pptx','pdf','html'] as const).map(format=><a key={format} href={fileURL(job.id,presentation[format])} download={`presentation.${format}`}>{format.toUpperCase()} ↓</a>)}</div></div>
+            <div className="result-head"><div className="exports">{(['pptx','pdf','html'] as const).map(format=><button key={format} disabled={Boolean(exportTask)} onClick={()=>download(format)}>{exportTask?.format===format?'Сборка…':format.toUpperCase()+' ↓'}</button>)}</div></div>
             <div className="review">
               <div className="viewer">
-                <div className="slide-preview"><img src={fileURL(job.id,presentation.previews[slide])} alt={currentChoice.title}/></div>
+                <div className="slide-preview"><img src={fileURL(job.id,currentChoice.options[selectedFor(currentChoice)].preview)} alt={currentChoice.title}/></div>
                 <div className="pagination"><button disabled={slide===0} onClick={()=>setSlide(slide-1)}>←</button><span>{slide+1} / {choices.length} · {currentChoice.title}</span><button disabled={slide+1===choices.length} onClick={()=>setSlide(slide+1)}>→</button></div>
-                <div className="deck-thumbs">{presentation.previews.map((preview,index)=><button key={preview} className={slide===index?'active':''} onClick={()=>setSlide(index)}><img src={fileURL(job.id,preview)} alt={`Слайд ${index+1}`}/><span>{index+1}</span><i>{choices[index]?.selected}</i></button>)}</div>
+                <div className="deck-thumbs">{choices.map((choice,index)=>{const selected=selectedFor(choice);const preview=choice.options[selected].preview;return <button key={choice.id} className={slide===index?'active':''} onClick={()=>setSlide(index)}><img src={fileURL(job.id,preview)} alt={`Слайд ${index+1}`}/><span>{index+1}</span><i>{selected}</i></button>})}</div>
               </div>
               <aside className="slide-editor">
                 <div className="eyebrow">СЛАЙД {slide+1} · {archetypes[currentChoice.archetype]||currentChoice.archetype}</div><h2>{currentChoice.title}</h2><p className="lead">{currentChoice.lead}</p>
                 {currentChoice.support_points.length>0&&<ul>{currentChoice.support_points.map(point=><li key={point}>{point}</li>)}</ul>}{currentChoice.takeaway&&<p className="takeaway">{currentChoice.takeaway}</p>}
-                <div className="choice-title"><b>Выберите компоновку</b><span>Синяя рамка — текущая</span></div>
-                <div className="slide-options">{(['A','B','C'] as const).map(id=>{const option=currentChoice.options[id];return <button key={id} className={currentChoice.selected===id?'active':''} disabled={busy} onClick={()=>currentChoice.selected!==id&&beginChild('select',{slide_id:currentChoice.id,variant:id})}><img src={fileURL(job.id,option.preview)} alt={option.label}/><span><b>{id} · {option.label}</b><small>оценка {Math.round(option.score)}/100</small></span></button>})}</div>
-                <div className="regenerate"><label>Что изменить?<textarea rows={3} value={instruction} onChange={e=>setInstruction(e.target.value)}/></label><button className="primary" disabled={busy||!instruction.trim()} onClick={()=>beginChild('regenerate-slide',{slide_id:currentChoice.id,instruction})}>Перегенерировать этот слайд</button><small>Остальные слайды и выбранные варианты сохранятся.</small></div>
-                <details><summary>Проверка качества: {currentIssues.length} замечаний</summary>{currentIssues.length===0?<p className="good">Нарушений не найдено.</p>:currentIssues.map(issue=><p key={issue.id}>{issue.message}</p>)}</details>
+                <div className="choice-title"><b>Выберите компоновку</b></div>
+                <div className="slide-options">{(['A','B','C'] as const).map(id=>{const option=currentChoice.options[id];return <button key={id} className={selectedFor(currentChoice)===id?'active':''} disabled={busy||Boolean(exportTask)} onClick={()=>setDraftSelection(previous=>({...previous,[currentChoice.id]:id}))}><img src={fileURL(job.id,option.preview)} alt={option.label}/><span><b>{id} · {option.label}</b><small>оценка {Math.round(option.score)}/100</small></span></button>})}</div>
+                <div className="regenerate"><label>Что изменить?<textarea rows={3} value={instruction} onChange={e=>setInstruction(e.target.value)}/></label><button className="primary" disabled={busy||Boolean(exportTask)||!instruction.trim()} onClick={()=>beginChild('regenerate-slide',{slide_id:currentChoice.id,instruction,selection:completeSelection()})}>Перегенерировать этот слайд</button></div>
               </aside>
             </div>
           </>}
         </>}
       </section>
     </main>
-    <footer>Оформление из вашего шаблона · содержание из ваших материалов</footer>
   </div>;
 }
 

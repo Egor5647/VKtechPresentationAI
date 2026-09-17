@@ -182,3 +182,9 @@ def test_end_to_end_worker(template_bytes,content,plan,tmp_path,monkeypatch):
     assert composed['selection'][slide_id]==replacement
     assert composed['slides'][0]['selected']==replacement
     assert artifact_path(composed['presentation']['pptx']).exists()
+    exported_selection={**composed['selection'],slide_id:before}
+    exported_job=store.enqueue('compose',{'parent_job_id':child,'request':{'selection':exported_selection}})
+    execute(store,store.claim(),FixtureGateway(plan))
+    exported=json.loads(store.job(exported_job).result)
+    assert exported['selection']==exported_selection
+    assert artifact_path(exported['presentation']['pdf']).exists()

@@ -8,7 +8,7 @@ from fastapi import FastAPI,UploadFile,HTTPException,Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from .contracts import GenerateRequest,RepairRequest,SelectionRequest,RegenerateSlideRequest,DesignIR,ContentIR
+from .contracts import GenerateRequest,RepairRequest,SelectionRequest,ExportRequest,RegenerateSlideRequest,DesignIR,ContentIR
 from .template import import_template
 from .content import import_content
 from .settings import artifact_path,ROOT,config
@@ -136,12 +136,22 @@ def select_slide(jid:str,request:SelectionRequest):
     return {'id':store().enqueue('compose',{'parent_job_id':jid,'request':request.model_dump()})}
 
 
+@app.post('/api/jobs/{jid}/export',status_code=202)
+def export_selection(jid:str,request:ExportRequest):
+    parent=store().job(jid)
+    if parent.state!='ready':raise HTTPException(409,'Job is not ready')
+    result=json.loads(parent.result);expected=set(result.get('selection',{}))
+    if set(request.selection)!=expected:raise ValueError('Selection must contain every slide exactly once')
+    return {'id':store().enqueue('compose',{'parent_job_id':jid,'request':request.model_dump()})}
+
+
 @app.post('/api/jobs/{jid}/regenerate-slide',status_code=202)
 def regenerate_slide(jid:str,request:RegenerateSlideRequest):
     parent=store().job(jid)
     if parent.state!='ready':raise HTTPException(409,'Job is not ready')
     result=json.loads(parent.result)
     if request.slide_id not in result.get('selection',{}):raise ValueError('Unknown slide ID')
+    if request.selection is not None and set(request.selection)!=set(result['selection']):raise ValueError('Selection must contain every slide exactly once')
     return {'id':store().enqueue('regenerate_slide',{'parent_job_id':jid,'request':request.model_dump()})}
 
 

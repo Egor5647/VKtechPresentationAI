@@ -219,9 +219,14 @@ class SelectionRequest(Contract):
     variant: Literal["A", "B", "C"]
 
 
+class ExportRequest(Contract):
+    selection: dict[str, Literal["A", "B", "C"]] = Field(min_length=1, max_length=50)
+
+
 class RegenerateSlideRequest(Contract):
     slide_id: str = Field(min_length=1, max_length=100)
     instruction: str = Field(default="Сделай слайд выразительнее и плотнее, сохрани все факты.", min_length=1, max_length=500)
+    selection: dict[str, Literal["A", "B", "C"]] | None = Field(default=None, min_length=1, max_length=50)
 
 
 class SlideRevision(Contract):

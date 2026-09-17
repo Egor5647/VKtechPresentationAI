@@ -5,7 +5,7 @@ import os
 import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from .contracts import ContentIR,DesignIR,GenerateRequest,SceneIR,AuditReport,RepairRequest,SelectionRequest,RegenerateSlideRequest,Asset
+from .contracts import ContentIR,DesignIR,GenerateRequest,SceneIR,AuditReport,RepairRequest,SelectionRequest,ExportRequest,RegenerateSlideRequest,Asset
 from .store import Store
 from .settings import artifact_path,ROOT,config
 from .model import ModelGateway
@@ -144,7 +144,8 @@ class Pipeline:
                     scores[slide.id][variant]=value;reasons[slide.id][variant]=detail
             selection=choose_variants(scores,[s.id for s in scenes[0].slides])
             if regenerate and parentresult.get('selection'):
-                selection={**parentresult['selection'],regenerate.slide_id:selection[regenerate.slide_id]}
+                base_selection=regenerate.selection or parentresult['selection']
+                selection={**base_selection,regenerate.slide_id:selection[regenerate.slide_id]}
             all_scenes=scenes;plan_path=str((folder/'plan.json').relative_to(artifact_path('.')))
         selected=compose_scene(all_scenes,selection,job.id+'-selected')
         selected_material=self._materialize(selected,folder,template,design,content,'presentation')
@@ -193,9 +194,15 @@ class Pipeline:
     def _compose(self,job,payload,folder,started,stage):
         parent=self.store.job(payload['parent_job_id']);result=json.loads(parent.result)
         if parent.state!='ready':raise ValueError('Parent job is not ready')
-        request=SelectionRequest.model_validate(payload['request']);original=GenerateRequest.model_validate(result['request'])
-        if request.slide_id not in result['selection']:raise ValueError('Unknown slide ID')
-        selection={**result['selection'],request.slide_id:request.variant}
+        original=GenerateRequest.model_validate(result['request'])
+        if 'selection' in payload['request']:
+            request=ExportRequest.model_validate(payload['request'])
+            if set(request.selection)!=set(result['selection']):raise ValueError('Selection must contain every slide exactly once')
+            selection=dict(request.selection)
+        else:
+            request=SelectionRequest.model_validate(payload['request'])
+            if request.slide_id not in result['selection']:raise ValueError('Unknown slide ID')
+            selection={**result['selection'],request.slide_id:request.variant}
         tr=self.store.record(original.template_id,'template');template=artifact_path(tr.path).read_bytes()
         design=DesignIR.model_validate_json(artifact_path(result['artifacts']['design']).read_bytes())
         content=ContentIR.model_validate_json(artifact_path(result['artifacts']['content']).read_bytes())
