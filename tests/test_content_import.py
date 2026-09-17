@@ -50,3 +50,15 @@ def test_pdf_content_uses_pages_as_optional_source_units(monkeypatch):
     assert content.claims[0].text=='Заголовок\nПервая строка'
     assert content.claims[0].source=='notes.pdf#page=1'
     assert all(not claim.required for claim in content.claims)
+
+
+def test_pdf_content_splits_long_pages_into_traceable_semantic_chunks(monkeypatch):
+    class Page:
+        def extract_text(self):return '\n'.join(f'Смысловой абзац {i}: '+('важные данные '*12)+'.' for i in range(14))
+    class Reader:pages=[Page()]
+    monkeypatch.setattr('pypdf.PdfReader',lambda stream:Reader())
+    content=import_content(b'%PDF-long','long.pdf')
+    assert len(content.claims)>1
+    assert all(400<=len(claim.text)<=1200 for claim in content.claims)
+    assert content.claims[0].source=='long.pdf#page=1;chunk=1'
+    assert all(not claim.required for claim in content.claims)

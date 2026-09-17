@@ -2,6 +2,7 @@
 from __future__ import annotations
 import base64
 import copy
+import hashlib
 import io
 import json
 import os
@@ -9,7 +10,7 @@ import time
 from pathlib import Path
 import httpx
 from pydantic import BaseModel
-from .settings import ROOT, config
+from .settings import ROOT, artifact_path, config
 
 
 class ModelUnavailable(RuntimeError):
@@ -81,27 +82,42 @@ class ModelGateway:
         if self.model not in approved: raise ValueError("MODEL_NAME must identify a model approved in config/models.yaml")
         timeout = float(os.environ.get("MODEL_TIMEOUT_SECONDS", "300"))
         self.client = client or httpx.Client(timeout=httpx.Timeout(timeout, connect=10))
+        self.cache_enabled=os.environ.get('MODEL_CACHE','1' if client is None else '0')=='1'
         self.calls = []
+
+    def _cache_path(self,kind: str,parts: list[bytes],suffix='json'):
+        digest=hashlib.sha256(b'\0'.join(parts)).hexdigest()
+        return artifact_path(f'cache/{kind}/{digest}.{suffix}')
 
     def structured(self, role: str, payload: dict, schema: type[BaseModel], images: list[Path] | None = None):
         if not self.url:
             raise ModelUnavailable("Configure VK_BASE_URL for final or MODEL_BASE_URL for selection. No model was called.")
         prompt = (ROOT / "prompts" / ("plan.txt" if role == "planning" else "audit.txt")).read_text()
         output_schema = response_schema(role, payload, schema)
-        content = [{"type":"text", "text":json.dumps({"data":payload,"output_schema":output_schema},ensure_ascii=False)}]
+        cache=self._cache_path('structured',[role.encode(),self.model.encode(),prompt.encode(),json.dumps(payload,ensure_ascii=False,sort_keys=True).encode(),json.dumps(output_schema,sort_keys=True).encode(),*[Path(p).read_bytes() for p in images or []]])
+        if self.cache_enabled and cache.exists():
+            result=schema.model_validate_json(cache.read_bytes())
+            self.calls.append({'role':role,'provider':'cache','mode':self.mode,'model':self.model,'seconds':0,'status_code':200,'attempt':0})
+            return result
+        # The schema is already supplied through response_format. Repeating it in
+        # the user message wastes thousands of local-model prefill tokens.
+        content = [{"type":"text", "text":json.dumps({"data":payload},ensure_ascii=False)}]
         for p in images or []:
             content.append({"type":"image_url", "image_url":{"url":encoded_image(p)}})
         headers = {"Authorization":"Bearer "+self.key} if self.key else {}
         error = None
         for attempt in range(2):
             started = time.monotonic()
-            max_tokens = int(os.environ.get("MODEL_MAX_TOKENS_" + role.upper(), "3000" if role == "planning" else "2500"))
+            max_tokens = int(os.environ.get("MODEL_MAX_TOKENS_" + role.upper(), "3000" if role == "planning" else "1800"))
             response = self.client.post(self.url+"/chat/completions",headers=headers,json={"model":self.model,"messages":[{"role":"system","content":prompt},{"role":"user","content":content}],"temperature":0.2,"max_tokens":max_tokens,"response_format":{"type":"json_schema","json_schema":{"name":role,"strict":True,"schema":output_schema}}})
             self.calls.append({"role":role,"provider":"vk" if self.profile=="final" else "configured_endpoint","mode":self.mode,"model":self.model,"seconds":round(time.monotonic()-started,3),"status_code":response.status_code,"attempt":attempt+1})
             response.raise_for_status()
             raw=response.json()["choices"][0]["message"]["content"]
             try:
-                return schema.model_validate_json(raw)
+                result=schema.model_validate_json(raw)
+                if self.cache_enabled:
+                    cache.parent.mkdir(parents=True,exist_ok=True);cache.write_text(result.model_dump_json(),encoding='utf-8')
+                return result
             except (ValueError,TypeError) as exc:
                 error = exc
                 content[0]["text"] += "\nPrevious response failed schema validation. Return a corrected JSON object."
@@ -111,7 +127,13 @@ class ModelGateway:
         url=os.environ.get("T2I_BASE_URL","").rstrip("/")
         if not url: raise ModelUnavailable("T2I_BASE_URL is required for image generation")
         key=os.environ.get("T2I_API_KEY","")
-        response=self.client.post(url+"/images/generations",headers={"Authorization":"Bearer "+key} if key else {},json={"model":self.manifest['image']['repository'],"prompt":prompt,"size":"1024x1024","response_format":"b64_json"})
+        size=f"{os.environ.get('T2I_WIDTH','1024')}x{os.environ.get('T2I_HEIGHT','1024')}"
+        model=os.environ.get('T2I_MODEL') or self.manifest['image']['repository']
+        cache=self._cache_path('images',[model.encode(),size.encode(),prompt.encode()],'png')
+        if self.cache_enabled and cache.exists():
+            output.parent.mkdir(parents=True,exist_ok=True);output.write_bytes(cache.read_bytes())
+            self.calls.append({'role':'text_to_image','provider':'cache','model':model,'status_code':200});return
+        response=self.client.post(url+"/images/generations",headers={"Authorization":"Bearer "+key} if key else {},json={"model":model,"prompt":prompt,"size":size,"response_format":"b64_json"},timeout=float(os.environ.get('T2I_TIMEOUT_SECONDS','1800')))
         response.raise_for_status()
         item=response.json()["data"][0]
         if not item.get("b64_json"): raise ValueError("T2I endpoint must return base64 image data")
@@ -120,4 +142,6 @@ class ModelGateway:
         import io
         im=Image.open(io.BytesIO(raw)); im.verify()
         output.parent.mkdir(parents=True,exist_ok=True); output.write_bytes(raw)
-        self.calls.append({"role":"text_to_image","model":self.manifest['image']['repository'],"status_code":response.status_code})
+        if self.cache_enabled:
+            cache.parent.mkdir(parents=True,exist_ok=True);cache.write_bytes(raw)
+        self.calls.append({"role":"text_to_image","model":model,"status_code":response.status_code})

@@ -16,6 +16,38 @@ def _clean_text(value: str) -> str:
     return re.sub(r'[ \t\r\f\v]+', ' ', value).strip()
 
 
+def _semantic_chunks(lines: list[str], minimum: int = 450, target: int = 850, maximum: int = 1200) -> list[str]:
+    """Group noisy PDF drawing lines into paragraph-sized, traceable source units.
+
+    PDF pages are often too large for accurate claim attribution, while individual
+    drawing lines are too fragmented.  This keeps headings with the following text
+    and bounds the units sent to the planner and auditor.
+    """
+    atoms=[]
+    for line in lines:
+        if len(line)<=maximum:
+            atoms.append(line);continue
+        words=line.split();current=[]
+        for word in words:
+            if current and len(' '.join(current+[word]))>maximum:
+                atoms.append(' '.join(current));current=[word]
+            else:current.append(word)
+        if current:atoms.append(' '.join(current))
+    chunks=[];current=[];length=0
+    for atom in atoms:
+        added=len(atom)+(1 if current else 0)
+        heading=len(atom)<90 and not re.search(r'[.!?;:]$',atom)
+        if current and length+added>maximum:
+            chunks.append('\n'.join(current));current=[];length=0
+        current.append(atom);length+=added
+        if length>=target and not heading:
+            chunks.append('\n'.join(current));current=[];length=0
+    if current:chunks.append('\n'.join(current))
+    if len(chunks)>1 and len(chunks[-1])<minimum and len(chunks[-2])+1+len(chunks[-1])<=maximum:
+        chunks[-2]+='\n'+chunks[-1];chunks.pop()
+    return chunks
+
+
 def _paragraphs(root) -> list[str]:
     result=[]
     for paragraph in root.findall('.//a:p',NS):
@@ -128,15 +160,14 @@ def import_content(data: bytes, filename: str, asset_writer: AssetWriter | None 
         from pypdf import PdfReader
         paragraphs=[]
         for i,page in enumerate(PdfReader(io.BytesIO(data)).pages):
-            # A PDF text extractor often returns one line per drawing operation. Treating
-            # every line as a claim adds hundreds of repeated JSON objects and can exhaust
-            # a local model's KV cache before generation starts. A page is the stable source
-            # unit and remains small enough for provenance and later selection by the brief.
             lines=[]
             for raw in (page.extract_text() or '').splitlines():
                 line=_clean_text(raw)
                 if line and line not in lines:lines.append(line)
-            if lines:paragraphs.append(('\n'.join(lines),f'{filename}#page={i+1}'))
+            chunks=_semantic_chunks(lines)
+            for ci,chunk in enumerate(chunks,1):
+                suffix='' if len(chunks)==1 else f';chunk={ci}'
+                paragraphs.append((chunk,f'{filename}#page={i+1}{suffix}'))
     elif ext in {'txt','md'}:
         paragraphs=[(line.strip().lstrip('# ').strip(),f'{filename}#line={i+1}') for i,line in enumerate(data.decode('utf-8-sig').splitlines()) if line.strip()]
     elif ext=='csv':

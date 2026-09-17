@@ -90,7 +90,7 @@ async def content(file:UploadFile):
     content=import_content(data,name,save_embedded if name.lower().endswith('.pptx') else None)
     allowed={r.path for r in store().records('asset')}
     if any(a.path not in allowed for a in content.assets):raise ValueError('Upload image assets first; use only returned asset paths')
-    rid=store().save_record('content',name,data,content.model_dump(),'bin')
+    rid=store().save_record('content',name,data,content.model_dump(),'bin',version='content-ir-v2')
     return {'id':rid,'content':content.model_dump()}
 
 

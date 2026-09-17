@@ -20,6 +20,9 @@ text:
       aliases: [mistralai/Ministral-3-14B-Instruct-2512]
 image:
   repository: Tongyi-MAI/Z-Image-Turbo
+  local_repository: mzbac/Z-Image-Turbo-8bit
+  local_revision: 1cc2c9cb261a04e5ad86ba0315b9e256c70fc1fa
+  quantization: 8-bit MLX
   revision: f332072aa78be7aecdf3ee76d5c247082da564a6
   parameters: 10261196515
   license: Apache-2.0

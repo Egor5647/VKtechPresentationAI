@@ -29,7 +29,10 @@ def temporary_objects(scene,slide):
         b=node.box;xywh=[round(v*s) for v,s in zip((b.x,b.y,b.w,b.h),(scene.width,scene.height,scene.width,scene.height))]
         if node.kind=='text':
             sh=out.shapes.add_textbox(*xywh);tf=sh.text_frame;tf.word_wrap=True
-            tf.margin_left=tf.margin_right=0;tf.margin_top=tf.margin_bottom=0
+            if node.style.fill:
+                sh.fill.solid();sh.fill.fore_color.rgb=RGBColor.from_string(node.style.fill)
+                tf.margin_left=tf.margin_right=Pt(10);tf.margin_top=tf.margin_bottom=Pt(8)
+            else:tf.margin_left=tf.margin_right=tf.margin_top=tf.margin_bottom=0
             for i,line in enumerate(node.text.split('\n')):
                 p=tf.paragraphs[0] if i==0 else tf.add_paragraph()
                 p.text=line;p.font.name=node.style.font;p.font.size=Pt(node.style.size);p.font.bold=node.style.bold;p.font.color.rgb=RGBColor.from_string(node.style.color)
@@ -76,6 +79,13 @@ def temporary_objects(scene,slide):
 
 def strip_content(root,prototype):
     remove={s.shape_id for s in prototype.slots if s.role in {'title','body','visual'}}
+    # Sample decks often contain phones, screenshots and empty demo frames built
+    # from ordinary vector shapes. Keep only small edge decorations and footers;
+    # the master/layout still carries the brand background, logo and page chrome.
+    for slot in prototype.slots:
+        area=slot.box.w*slot.box.h
+        edge=slot.box.x<.035 or slot.box.y<.035 or slot.box.x+slot.box.w>.965 or slot.box.y+slot.box.h>.965
+        if slot.role=='decor' and not (edge and area<=.02):remove.add(slot.shape_id)
     for shape in list(root.findall('.//p:sp',NS))+list(root.findall('.//p:pic',NS))+list(root.findall('.//p:graphicFrame',NS)):
         nv=shape.find('.//p:cNvPr',NS)
         if nv is not None and int(nv.get('id')) in remove:shape.getparent().remove(shape)
@@ -169,7 +179,7 @@ def export_html(scene,path,backgrounds=None):
         nodes=[]
         for n in slide.nodes:
             b=n.box;fs=n.style.size/72/(scene.width/914400)*100
-            style=f'left:{b.x*100}%;top:{b.y*100}%;width:{b.w*100}%;height:{b.h*100}%;font-family:{html.escape(json.dumps(n.style.font),quote=True)},sans-serif;font-size:{fs}cqw;color:#{n.style.color};text-align:{n.style.align};font-weight:{700 if n.style.bold else 400}'
+            style=f'left:{b.x*100}%;top:{b.y*100}%;width:{b.w*100}%;height:{b.h*100}%;font-family:{html.escape(json.dumps(n.style.font),quote=True)},sans-serif;font-size:{fs}cqw;color:#{n.style.color};text-align:{n.style.align};font-weight:{700 if n.style.bold else 400};background:{"#"+n.style.fill if n.style.fill else "transparent"};padding:{"0.45em" if n.style.fill else "0"}'
             if n.kind=='text':body=html.escape(n.text).replace('\n','<br>')
             elif n.kind=='chart':body=chart_svg(n,scene.variant)
             elif n.kind=='table':

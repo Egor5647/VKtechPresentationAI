@@ -37,12 +37,24 @@ def planning_claims(content: ContentIR, brief: str) -> list:
     return selected
 
 
+def _visual_kind(slide) -> str:
+    text=(slide.title+' '+slide.message).lower()
+    if re.search(r'этап|послед|алгоритм|планиров|scheduler|fork|join|reduc|распростран|propagat|\bset\b',text):return 'sequence'
+    if re.search(r'dag|граф|дерев|иерарх|завис|work|span',text):return 'hierarchy'
+    return 'list'
+
+
 def normalize_plan(plan: PresentationPlan) -> PresentationPlan:
-    """Remove incomplete optional visual intents without changing sourced claims."""
+    """Repair optional visual intents and enforce a useful native-visual quota."""
     result=plan.model_copy(deep=True)
     for slide in result.slides:
         if slide.visual=='image' and not slide.asset_id:slide.visual='none'
         if slide.visual in {'chart','table'} and not slide.dataset_id:slide.visual='none'
+    candidates=[s for s in result.slides if s.role=='content' and not s.dataset_id and not s.asset_id]
+    target=round(len(candidates)*.5)
+    have=sum(s.visual in {'sequence','list','hierarchy'} for s in candidates)
+    ranked=sorted((s for s in candidates if s.visual=='none'),key=lambda s:(0 if re.search(r'PRAM|DAG|Work|Span|планиров|алгоритм|сравн|этап',s.title+' '+s.message,re.I) else 1,s.id))
+    for slide in ranked[:max(0,target-have)]:slide.visual=_visual_kind(slide)
     return result
 
 
@@ -120,12 +132,18 @@ def plan_with_model(gateway,content,request):
 
 def usable_prototypes(design):
     candidates=[]
-    instruction=re.compile(r'правила|инструкция|типограф|палитр|шрифт|пример|используйте|рекоменду|макет|как использовать',re.I)
+    instruction=re.compile(r'правила|инструкция|типограф|палитр|используйте|рекоменду|макет|как использовать',re.I)
     for p in design.prototypes:
         title=next((s for s in p.slots if s.role=='title'),None)
         bodies=body_slots(p)
         if title and title.box.w>.35 and title.box.h>.06 and bodies:
-            score=max(s.box.w*s.box.h for s in bodies)+.25*sum(s.box.w*s.box.h for s in bodies)
+            visual_area=sum(s.box.w*s.box.h for s in p.slots if s.role=='visual')
+            central_decor=sum(s.box.w*s.box.h for s in p.slots if s.role=='decor' and s.box.y<.9 and s.box.w*s.box.h>.01)
+            score=max(s.box.w*s.box.h for s in bodies)+.12*sum(s.box.w*s.box.h for s in bodies)
+            score-=.7*visual_area+.5*central_decor
+            if visual_area>.04 or central_decor>.04:score-=1
+            score+=.18 if len(bodies)<=2 else 0
+            score+=.12 if min(s.style.size for s in bodies)>=16 else 0
             score-=.8 if instruction.search(' '.join(s.source_text[:180] for s in p.slots if s.role=='title')) else 0
             score-=.02*len(bodies)
             score-=1 if any(re.search(r'\bpadding\b|\bmargin\b|\bbody\s*\{',s.source_text) for s in bodies) else 0
@@ -135,7 +153,72 @@ def usable_prototypes(design):
 
 
 def body_slots(p):
-    return [s for s in p.slots if s.role=='body' and s.box.w>.25 and s.box.h>.1 and 10<=s.style.size<=36]
+    return [s for s in p.slots if s.role=='body' and s.box.w>.25 and s.box.h>.1 and 12<=s.style.size<=96]
+
+
+def _scale_size(design, minimum, preferred):
+    valid=sorted(s for s in design.font_sizes if s>=minimum and s<=preferred*1.35)
+    return min(valid,key=lambda s:abs(s-preferred)) if valid else preferred
+
+
+def _readable_color(color,background,design,threshold=4.5):
+    from .audit import contrast
+    candidates=list(dict.fromkeys([color,*design.palette,'202020','FFFFFF']))
+    valid=[c for c in candidates if isinstance(c,str) and re.fullmatch(r'[0-9A-Fa-f]{6}',c)]
+    best=max(valid,key=lambda c:contrast(c,background),default='202020')
+    return color if re.fullmatch(r'[0-9A-Fa-f]{6}',color or '') and contrast(color,background)>=threshold else best
+
+
+def _style(base,design,background,role='body',align='left'):
+    result=base.model_copy(deep=True);result.align=align;result.fill=None
+    result.size=_scale_size(design,28,34 if role=='title' else 20) if role=='title' else _scale_size(design,18,20)
+    result.bold=role=='title';result.color=_readable_color(result.color,background,design,3 if role=='title' else 4.5)
+    return result
+
+
+def _short(value,limit=72):
+    value=re.sub(r'\s+',' ',value).strip(' •–—-')
+    if len(value)<=limit:return value
+    words=value.split();out=[]
+    for word in words:
+        if len(' '.join(out+[word]))>limit-1:break
+        out.append(word)
+    return (' '.join(out) or value[:limit-1]).rstrip(' ,;:.')+'…'
+
+
+def _diagram_items(ps,claims):
+    query=set(re.findall(r'[\w+#<>]{4,}',(ps.title+' '+ps.message).lower()))
+    message_parts=[x for x in re.split(r'\n+|(?<=[.!?;])\s+|\s+[—–]\s+',ps.message) if x.strip()]
+    primary=([ps.title]+message_parts if ps.visual=='hierarchy' else message_parts)
+    source=[]
+    for cid in ps.claim_ids:
+        claim=claims.get(cid)
+        if not claim:continue
+        source.extend(x for x in re.split(r'\n+|(?<=[.!?;])\s+',claim.text) if x.strip() and not re.search(r'^(ответ|вопрос|решите|домашн|самопровер|конспект лекции|параллельные алгоритмы\s*\|)|^\d+[.)]?$|\b\d{1,2}:\d{2}\b',x.strip(),re.I))
+    def cleaned(values):
+        result=[]
+        for text in values:
+            text=_short(text)
+            if text and not re.fullmatch(r'\d+[.)]?',text) and text.casefold() not in {x.casefold() for x in result}:result.append(text)
+        return result
+    chosen=cleaned(primary)
+    extras=[]
+    for text in cleaned(source):
+        words=set(re.findall(r'[\w+#<>]{4,}',text.lower()));score=len(words&query)
+        if score:extras.append((-score,len(text),text))
+    for _,_,text in sorted(extras):
+        if text.casefold() not in {x.casefold() for x in chosen}:chosen.append(text)
+        if len(chosen)>=4:break
+    unique=[]
+    for text in chosen:
+        text=_short(text)
+        if text and not re.fullmatch(r'\d+[.)]?',text) and text.casefold() not in {x.casefold() for x in unique}:unique.append(text)
+    def rank(text):
+        words=set(re.findall(r'[\w+#<>]{4,}',text.lower()))
+        return (-len(words&query),len(text))
+    items=unique[:4] if len(unique)>=2 else sorted(unique,key=rank)[:4]
+    if len(items)<2:items=[_short(ps.title),_short(ps.message)]
+    return items
 
 
 def fit_node(node,design):
@@ -146,7 +229,8 @@ def fit_node(node,design):
     from .audit import font_for
     from PIL import ImageFont
     from .settings import ROOT
-    sizes={node.style.size}|{s for s in design.font_sizes if 8<=s<node.style.size}|{8.0,9.0,10.0}
+    minimum=28 if node.role=='title' else 18
+    sizes={node.style.size}|{s for s in design.font_sizes if minimum<=s<node.style.size}|{float(minimum)}
     for size in sorted((s for s in sizes if s<=node.style.size),reverse=True):
         font=font_for(node.style.font,max(1,round(size*96/72)))
         if font is None:
@@ -170,44 +254,56 @@ def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, j
     for vi,variant in enumerate(('A','B','C')):
         slides=[]
         for si,ps in enumerate(plan.slides):
-            # Select distinct original compositions, without template-specific IDs.
-            pool=prototypes[:min(6,len(prototypes))]
-            p=pool[(si+vi*max(1,len(pool)//3))%len(pool)]
+            # Use only the cleanest sample slides as branded backgrounds. Generated
+            # content follows explicit readable frames instead of inheriting demo text.
+            pool=prototypes[:min(3,len(prototypes))]
+            p=pool[(si+vi)%len(pool)]
             title=next(s for s in p.slots if s.role=='title')
             bodies=sorted(body_slots(p),key=lambda s:(s.box.y,s.box.x))
-            nodes=[Node(id=f'{ps.id}-title',kind='text',role='title',box=title.box.model_copy(),style=title.style.model_copy(deep=True),text=ps.title,binding=title.id)]
-            texts=[part.strip() for part in re.split(r'\n+|(?<=[.!?])\s+',ps.message) if part.strip()] or [ps.message]
-            slot=max(bodies,key=lambda s:s.box.w*s.box.h)
-            nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=slot.box.model_copy(),style=slot.style.model_copy(deep=True),text=ps.message,claim_ids=ps.claim_ids,binding=slot.id))
+            base=max(bodies,key=lambda s:s.box.w*s.box.h).style
+            title_style=_style(title.style,design,p.background,'title')
+            body_style=_style(base,design,p.background)
+            surface='EBF3F9' if 'EBF3F9' in design.palette else 'E8EEF6'
+            accent=next((c for c in ('0077FF','2688EB','005FF9') if c in design.palette),'0077FF')
+            if ps.role=='cover':
+                title_style.size=_scale_size(design,36,48);title_style.align='center'
+                body_style.size=_scale_size(design,20,24);body_style.align='center'
+                nodes=[Node(id=f'{ps.id}-accent',kind='text',role='accent',box=Box(x=.08,y=.12,w=.16,h=.015),style=Style(font=body_style.font,size=18,color=accent,fill=accent),text=''),Node(id=f'{ps.id}-title',kind='text',role='title',box=Box(x=.08,y=.17,w=.84,h=.31),style=title_style,text=ps.title),Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.15,y=.55,w=.70,h=.20),style=body_style,text=ps.message,claim_ids=ps.claim_ids)]
+            else:
+                nodes=[Node(id=f'{ps.id}-title',kind='text',role='title',box=Box(x=.07,y=.07,w=.86,h=.19),style=title_style,text=ps.title),Node(id=f'{ps.id}-accent',kind='text',role='accent',box=Box(x=.07,y=.265,w=.12,h=.012),style=Style(font=body_style.font,size=18,color=accent,fill=accent),text='')]
             visual=ps.visual
             if ps.dataset_id: visual='table' if variant=='C' else 'chart'
-            elif visual in {'sequence','list','hierarchy'} and variant=='A': visual='none'
-            if visual!='none':
-                slot=max(bodies,key=lambda s:s.box.w*s.box.h)
-                # Derive a safe content frame from the actual template title and body anchors.
-                # Data widgets require a larger continuous area than a single annotation slot.
-                left=max(.025,min(title.box.x,min(s.box.x for s in bodies)))
-                right=min(.975,max(title.box.x+title.box.w,max(s.box.x+s.box.w for s in bodies)))
-                top=max(title.box.y+title.box.h+.035,min(s.box.y for s in bodies));bottom=.88
-                frame=Box(x=left,y=top,w=right-left,h=max(.1,bottom-top))
-                body_nodes=[n for n in nodes if n.role=='body']
-                if body_nodes:
-                    # Consolidate claims to free a continuous visual region; preserve their order.
-                    for n in body_nodes:nodes.remove(n)
-                    st=min(bodies,key=lambda s:s.style.size).style.model_copy(deep=True)
-                    nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=frame.x,y=frame.y,w=frame.w*.32,h=frame.h),style=st,text='\n'.join(texts),claim_ids=ps.claim_ids))
-                    vb=Box(x=frame.x+frame.w*.38,y=frame.y,w=frame.w*.62,h=frame.h)
-                else:vb=frame
+            if ps.role!='cover':
+                if visual!='none' and variant=='A':
+                    nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.08,y=.29,w=.84,h=.23),style=body_style,text=ps.message,claim_ids=ps.claim_ids));vb=Box(x=.08,y=.57,w=.84,h=.28)
+                elif visual!='none' and variant=='B':
+                    small=body_style.model_copy(deep=True);small.size=_scale_size(design,18,18);small.align='center'
+                    nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.12,y=.72,w=.76,h=.17),style=small,text=ps.message,claim_ids=ps.claim_ids));vb=Box(x=.08,y=.29,w=.84,h=.37)
+                elif visual!='none':
+                    body_style.fill=surface
+                    nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.07,y=.31,w=.36,h=.48),style=body_style,text=ps.message,claim_ids=ps.claim_ids));vb=Box(x=.50,y=.31,w=.43,h=.48)
+                else:
+                    body_style.size=_scale_size(design,20,24 if variant=='B' else 20);body_style.align='center' if variant=='B' else 'left'
+                    body_style.fill=surface
+                    nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.11 if variant=='B' else .08,y=.34,w=.78 if variant=='B' else .72,h=.32),style=body_style,text=ps.message,claim_ids=ps.claim_ids))
+            if visual!='none' and ps.role!='cover':
                 kind='smartart' if visual in {'sequence','list','hierarchy'} else visual
-                data=datasets[ps.dataset_id].model_dump() if ps.dataset_id else assets[ps.asset_id].model_dump() if ps.asset_id else {'layout':visual,'items':texts}
-                visualstyle=min(bodies,key=lambda s:s.style.size).style.model_copy(deep=True)
+                data=datasets[ps.dataset_id].model_dump() if ps.dataset_id else assets[ps.asset_id].model_dump() if ps.asset_id else {'layout':visual,'items':_diagram_items(ps,claims)}
+                # The comparison composition gives the visual half of the slide.
+                # PowerPoint applies its own native SmartArt layout and can ignore
+                # a cached 2x2 drawing, so use the stable vertical list algorithm.
+                if kind=='smartart' and variant=='C' and len(data.get('items',[]))>2:
+                    data['layout']='list'
+                visualstyle=_style(base,design,p.background);visualstyle.size=_scale_size(design,16,18)
+                from .audit import contrast
+                visualstyle.fill='E8EEF6' if contrast(visualstyle.color,'E8EEF6')>=4.5 else '17324D'
                 nodes.append(Node(id=f'{ps.id}-visual',kind=kind,role='visual',box=vb,style=visualstyle,data=data,claim_ids=ps.claim_ids if kind=='smartart' else []))
             title_bottom=nodes[0].box.y+nodes[0].box.h+.015
             for node in nodes:
                 if node.role=='body' and node.box.x<nodes[0].box.x+nodes[0].box.w and node.box.x+node.box.w>nodes[0].box.x and node.box.y<title_bottom:
                     delta=title_bottom-node.box.y;node.box.y=title_bottom;node.box.h=max(.03,node.box.h-delta)
             for node in nodes:
-                if node.kind=='text':fit_node(node,design)
+                if node.kind=='text' and node.text.strip():fit_node(node,design)
             slides.append(SceneSlide(id=ps.id,title=ps.title,role=ps.role,prototype_id=p.id,background=p.background,nodes=nodes))
         scenes.append(SceneIR(id=f'{job_id}-{variant}',variant=variant,template_id=design.id,content_id=content.id,width=design.width,height=design.height,slides=slides))
     return scenes

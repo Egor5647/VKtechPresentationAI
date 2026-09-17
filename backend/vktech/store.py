@@ -62,8 +62,8 @@ class Store:
     def session(self):
         with self.sessions.begin() as s:yield s
 
-    def save_record(self,kind,name,data,document,extension):
-        digest=hashlib.sha256(data).hexdigest();rid=kind+'-'+digest[:24]
+    def save_record(self,kind,name,data,document,extension,version=''):
+        digest=hashlib.sha256(data).hexdigest();identity=hashlib.sha256(version.encode()+b'\0'+data).hexdigest() if version else digest;rid=kind+'-'+identity[:24]
         rel=f'blobs/{digest}.{extension}'
         path=artifact_path(rel);path.parent.mkdir(parents=True,exist_ok=True)
         if not path.exists():

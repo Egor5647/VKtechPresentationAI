@@ -30,6 +30,9 @@ def test_three_variants_native_objects(template_bytes,content,plan,tmp_path):
         html=tmp_path/(scene.variant+'.html');export_html(scene,html)
         text=html.read_text();assert '<svg' in text or '<table' in text
         assert 'aria-label="Навигация"' in text and 'ArrowRight' in text
+        if scene.variant=='C':
+            compact=[n for s in scene.slides for n in s.nodes if n.kind=='smartart' and len(n.data.get('items',[]))>2]
+            assert all(n.data.get('layout')=='list' for n in compact)
     assert len({tuple(s.prototype_id for s in sc.slides) for sc in scenes})==3
 
 
@@ -55,6 +58,13 @@ def test_incomplete_optional_visual_intent_is_removed(plan):
     assert fixed.slides[0].claim_ids==broken.slides[0].claim_ids
 
 
+def test_normalized_plan_has_native_visual_quota(plan):
+    fixed=normalize_plan(plan)
+    content_slides=[slide for slide in fixed.slides if slide.role=='content' and not slide.dataset_id and not slide.asset_id]
+    native=[slide for slide in content_slides if slide.visual in {'sequence','list','hierarchy'}]
+    assert len(native)>=round(len(content_slides)*.5)
+
+
 def test_planner_retries_with_missing_claim_feedback(content,plan):
     class Gateway:
         def __init__(self):self.payloads=[]
@@ -64,7 +74,7 @@ def test_planner_retries_with_missing_claim_feedback(content,plan):
                 incomplete=plan.model_copy(deep=True);incomplete.slides[-1].claim_ids=[];return incomplete
             return plan
     gateway=Gateway();request=GenerateRequest(template_id='template',content_id='content',brief='test')
-    assert plan_with_model(gateway,content,request)==plan
+    assert plan_with_model(gateway,content,request)==normalize_plan(plan)
     assert len(gateway.payloads)==2
     assert 'omits mandatory claims' in gateway.payloads[1]['validation_feedback']
     assert set(gateway.payloads[0]['required_claim_ids'])=={c.id for c in content.claims if c.required}

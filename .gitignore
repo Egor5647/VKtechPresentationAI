@@ -1,5 +1,6 @@
 .venv/
 .mlx-venv*/
+.tools/
 node_modules/
 __pycache__/
 .pytest_cache/

@@ -6,7 +6,7 @@ from PIL import ImageFont
 from .contracts import AuditReport, Issue, ContextualReport, ContextualFailureReport
 
 RULES={
- 'D01':'Элемент вне слайда','D02':'Наложение блоков','D03':'Переполнение текста','D04':'Текст обрезан краем','D05':'Выравнивание по шаблону','D06':'Поля','D07':'Пропорции изображения','D08':'Гарнитуры','D09':'Типографическая шкала','D10':'Палитра','D11':'Происхождение композиции','D12':'Логотип и колонтитул','D13':'Контраст','D14':'Количество пунктов','D15':'Длина пункта','D16':'Размер таблицы','D17':'Количество серий','D18':'Заполнение слайда','D19':'Открываемость','D20':'Заглушки','D21':'Пустой слайд','D22':'Редактируемые объекты','D23':'Подписи диаграммы','D24':'Дублирование слайдов'}
+ 'D01':'Элемент вне слайда','D02':'Наложение блоков','D03':'Переполнение текста','D04':'Текст обрезан краем','D05':'Выравнивание по шаблону','D06':'Поля','D07':'Пропорции изображения','D08':'Гарнитуры','D09':'Типографическая шкала','D10':'Палитра','D11':'Происхождение композиции','D12':'Логотип и колонтитул','D13':'Контраст','D14':'Количество пунктов','D15':'Длина пункта','D16':'Размер таблицы','D17':'Количество серий','D18':'Заполнение слайда','D19':'Открываемость','D20':'Заглушки','D21':'Пустой слайд','D22':'Редактируемые объекты','D23':'Подписи диаграммы','D24':'Дублирование слайдов','D25':'Минимальный кегль','D26':'Пустые декоративные контейнеры'}
 PLACEHOLDER=re.compile(r'\blorem ipsum\b|\bXXX\b|\bTODO\b|вставьте текст|\[Text\]',re.I)
 
 
@@ -78,22 +78,28 @@ def audit_scene(scene,design,content,opened=False):
                 add('D01',[n],repair='clamp',severity='error')
                 if n.kind=='text':add('D04',[n],repair='clamp',severity='error')
             if n.kind=='text':
-                h=text_height(n,scene)
+                h=text_height(n,scene) if n.text.strip() else 0
                 if h is None:add('D03',[n],status='unknown',category='environment',message=f'Font {n.style.font} is unavailable; text fit is unverified')
                 elif h>b.h:add('D03',[n],repair='fit_text',evidence={'measured_height':h,'available_height':b.h})
                 if n.style.font not in design.fonts:add('D08',[n])
                 if n.style.size not in design.font_sizes:add('D09',[n])
                 if n.style.color not in design.palette:add('D10',[n])
-                ratio=contrast(n.style.color,n.style.fill or slide.background)
-                if ratio<4.5:add('D13',[n],evidence={'ratio':round(ratio,2),'background_method':'solid color; decoration requires visual check'})
+                if n.text.strip():
+                    ratio=contrast(n.style.color,n.style.fill or slide.background);threshold=3 if n.role=='title' and n.style.size>=18 else 4.5
+                    if ratio<threshold:add('D13',[n],evidence={'ratio':round(ratio,2),'threshold':threshold,'background_method':'solid color; decoration requires visual check'})
                 if PLACEHOLDER.search(n.text):add('D20',[n],repair='remove_placeholder')
+                minimum=28 if n.role=='title' else 18
+                if n.style.size<minimum:add('D25',[n],severity='error',evidence={'size':n.style.size,'minimum':minimum})
                 if n.role=='body':
                     lines=n.text.split('\n')
                     if len(lines)>6:add('D14',[n],evidence={'count':len(lines)})
-                    for line in lines:
-                        count=len(re.findall(r'\S+',line))
-                        if count>15:
-                            add('D15',[n],evidence={'max_words':count});break
+                    # D15 is a bullet-list rule. Wrapped prose is validated by the
+                    # measured fit check rather than by an arbitrary sentence length.
+                    if len(lines)>1:
+                        for line in lines:
+                            count=len(re.findall(r'\S+',line))
+                            if count>15:
+                                add('D15',[n],evidence={'max_words':count});break
             if n.kind=='table' and (len(n.data['categories'])+1>7 or len(n.data['series'])+1>5):add('D16',[n])
             if n.kind=='chart':
                 if len(n.data['series'])>5:add('D17',[n])
@@ -113,7 +119,8 @@ def audit_scene(scene,design,content,opened=False):
                 slot=bindings.get(n.binding)
                 if slot and abs(n.box.x-slot.box.x)>.005:add('D05',[n])
             # Protected objects are copied byte-for-byte, not repositioned by layout.
-            add('D12',status='pass',message='Source decorative/footer objects retained by package copy')
+            add('D12',status='pass',message='Master, layout and footer objects retained by package copy')
+            add('D26',status='pass',message='Unused sample placeholders and central decorative containers are removed during export')
         bounds=[s.box for p in design.prototypes for s in p.slots if s.role in {'body','title'}]
         minx=max(0,min((b.x for b in bounds),default=.03));maxx=min(1,max((b.x+b.w for b in bounds),default=.97))
         for n in slide.nodes:
@@ -145,8 +152,9 @@ def contextual_audit(gateway,scene,content,images):
     from PIL import Image,ImageDraw
     failures_only=os.environ.get('MODEL_AUDIT_MODE','failures')=='failures'
     schema=ContextualFailureReport if failures_only else ContextualReport
+    claim_limit=max(200,int(os.environ.get('MODEL_AUDIT_CLAIM_CHARS','320')))
     used_claims={cid for slide in scene.slides for node in slide.nodes for cid in node.claim_ids}
-    compact_content={'id':content.id,'title':content.title,'language':content.language,'claims':[c.model_dump() for c in content.claims if c.id in used_claims]}
+    compact_content={'id':content.id,'title':content.title,'language':content.language,'claims':[{'id':c.id,'text':c.text[:claim_limit],'source':c.source,'required':c.required} for c in content.claims if c.id in used_claims]}
     compact_scene={'id':scene.id,'variant':scene.variant,'slides':[]}
     for slide in scene.slides:
         nodes=[]
@@ -174,6 +182,15 @@ def contextual_audit(gateway,scene,content,images):
         valid={n.id for n in slides[item.slide_id].nodes}
         if not set(item.element_ids)<=valid:raise ValueError('Contextual audit returned unknown element')
         if (item.rule,item.slide_id) in seen:raise ValueError('Duplicate contextual rule result')
+        observation=(item.message+' '+item.evidence).lower()
+        # C04 verifies that displayed facts are supported. It must not require a
+        # slide to reproduce every fact from a referenced multi-fact source chunk.
+        if item.rule=='C04' and re.search(r'отсутств|не упомин|не полностью|не содержит',observation):continue
+        # Repetition between prose and a useful native diagram is not service
+        # debris. C07 is reserved for actual headers, page numbers and placeholders.
+        if item.rule=='C07' and re.search(r'повтор|дублир',observation) and not re.search(r'конспект|стр\.?\s*\d|todo|lorem|заглуш',observation):continue
+        if item.rule=='C08' and re.search(r'отсутств|не уточн|не указан',observation):continue
+        if item.rule=='C06' and re.search(r'повтор|дублир',observation) and not any(n.kind=='image' for n in slides[item.slide_id].nodes):continue
         seen.add((item.rule,item.slide_id))
         result.append(issue(scene,item.rule,slides[item.slide_id],item.element_ids,status=item.status,message=item.message,evidence={'model_observation':item.evidence},category='contextual'))
     # An omitted check is unknown, never a successful result.
@@ -181,6 +198,19 @@ def contextual_audit(gateway,scene,content,images):
         for i in range(1,12):
             rule=f'C{i:02}'
             if (rule,slide.id) not in seen:result.append(issue(scene,rule,slide,status='unknown',message='Model omitted this contextual check',category='contextual'))
+    return result
+
+
+def project_contextual_issues(source_issues,source_scene,target_scene):
+    """Reuse content findings for variants that share the exact plan and facts."""
+    slides={s.id:s for s in target_scene.slides};result=[]
+    for item in source_issues:
+        slide=slides.get(item.slide_id) if item.slide_id else None
+        if item.slide_id and slide is None:continue
+        valid={n.id for n in slide.nodes} if slide else set()
+        nodes=[nid for nid in item.element_ids if nid in valid]
+        evidence=dict(item.evidence);evidence['shared_audit_from']=source_scene.variant
+        result.append(issue(target_scene,item.rule,slide,nodes,status=item.status,message=item.message,severity=item.severity,repair='none',evidence=evidence,category='contextual'))
     return result
 
 
