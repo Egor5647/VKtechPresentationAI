@@ -91,6 +91,16 @@ def test_candidate_selection_and_composition(template_bytes,content,plan):
     assert composed.variant=='selected'
 
 
+def test_variants_have_distinct_density_and_type_scale(template_bytes,content,plan):
+    structured=enrich_plan(plan,content);target=structured.slides[1]
+    target.support_points=['Короткая деталь A','Короткая деталь B','Короткая деталь C']
+    scenes=build_scenes(import_template(template_bytes),content,structured,'density')
+    slides=[scene.slides[1] for scene in scenes]
+    bodies=[next(node for node in slide.nodes if node.role=='body') for slide in slides]
+    assert bodies[0].style.size>bodies[1].style.size>bodies[2].style.size
+    assert len(slides[0].nodes)<len(slides[1].nodes)<len(slides[2].nodes)
+
+
 def test_planner_retries_with_missing_claim_feedback(content,plan):
     class Gateway:
         def __init__(self):self.payloads=[]

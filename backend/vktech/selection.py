@@ -10,7 +10,8 @@ def score_candidate(scene,slide,preview:Path|None=None):
     """Score a rendered slide with transparent, deterministic quality signals."""
     boxes=[n.box for n in slide.nodes]
     fill=union_area(boxes)
-    target=.48 if any(n.kind in {'image','diagram','chart','table'} for n in slide.nodes) else .40
+    visual=any(n.kind in {'image','diagram','chart','table'} for n in slide.nodes)
+    target={'A':.34,'B':.46,'C':.58}.get(scene.variant,.48 if visual else .40)
     score=100-abs(fill-target)*95
     reasons={'fill':round(fill,3),'target_fill':target}
     overlaps=0

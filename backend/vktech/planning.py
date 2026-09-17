@@ -230,7 +230,7 @@ def body_slots(p):
 
 
 def _scale_size(design, minimum, preferred):
-    valid=sorted(s for s in design.font_sizes if s>=minimum and s<=preferred*1.35)
+    valid=sorted(s for s in design.font_sizes if s>=minimum and s<=preferred)
     return min(valid,key=lambda s:abs(s-preferred)) if valid else preferred
 
 
@@ -373,6 +373,8 @@ def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, j
             last=si==len(plan.slides)-1
             if (is_cover or last) and dark:
                 p=dark[(si+vi)%len(dark)]
+            elif variant=='C' or (variant=='B' and visual!='none'):
+                p=plain[(si+vi)%min(3,len(plain))]
             elif ps.role=='divider' and (light or dark):
                 pool=light or dark;p=pool[(si+vi)%len(pool)]
             elif visual=='none' and (content_light or light):
@@ -384,65 +386,74 @@ def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, j
             title_style=_style(style_title.style,design,p.background,'title')
             body_style=_style(style_body,design,p.background)
             supports=ps.support_points or _supporting_points(ps,claims,3)
+            limits={'A':80,'B':95,'C':120} if visual!='none' else {'A':100,'B':145,'C':185}
+            lead_text=_short(ps.message,limits[variant])
             nodes=[]
             if is_cover or last:
-                title_style.size=_scale_size(design,36,48);body_style.size=_scale_size(design,20,24)
+                title_size={'A':48,'B':42,'C':36}[variant];body_size={'A':24,'B':22,'C':18}[variant]
+                title_style.size=_scale_size(design,32,title_size);body_style.size=_scale_size(design,18,body_size)
                 title_style.align=body_style.align='left';body_style.bold=True
                 if _dark_background(p.background):title_style.color=body_style.color='FFFFFF'
                 cover_w=.58 if p in branded else .88
                 nodes.append(Node(id=f'{ps.id}-title',kind='text',role='title',box=Box(x=.06,y=.18,w=cover_w,h=.36),style=title_style,text=ps.title))
-                nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=.59,w=cover_w,h=.29),style=body_style,text=ps.message,claim_ids=ps.claim_ids))
+                nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=.59,w=cover_w,h=.29),style=body_style,text=lead_text,claim_ids=ps.claim_ids))
             else:
                 branded_slide=p in branded
                 content_right=.70 if branded_slide else .94
                 title_h=.19 if len(ps.title)<=50 else .28
+                title_style.size=_scale_size(design,28,{'A':38,'B':34,'C':32}[variant])
                 nodes.append(Node(id=f'{ps.id}-title',kind='text',role='title',box=Box(x=.06,y=.07,w=content_right-.06,h=title_h),style=title_style,text=ps.title))
                 nodes.append(Node(id=f'{ps.id}-accent',kind='text',role='accent',box=Box(x=.06,y=.07+title_h+.01,w=.10,h=.012),style=Style(font=body_style.font,size=18,color=accent,fill=accent),text=''))
                 top=.07+title_h+.07
                 if visual!='none':
-                    long_message=len(ps.message)>105
-                    if len(ps.message)>150:body_style.size=_scale_size(design,18,18)
-                    if visual=='image':
-                        # Normalized square boxes have the same physical 16:9 ratio
-                        # as a widescreen slide, so the generated image fills them.
-                        image_left=.42 if variant!='B' else .06
-                        text_left=.06 if variant!='B' else .63
-                        nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=text_left,y=top,w=.31,h=.45),style=body_style,text=ps.message,claim_ids=ps.claim_ids))
-                        vb=Box(x=image_left,y=top,w=.52,h=.52)
-                    elif variant=='A':
-                        nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=content_right-.06,h=.22),style=body_style,text=ps.message,claim_ids=ps.claim_ids))
-                        vb=Box(x=.06,y=top+.26,w=content_right-.06,h=.84-(top+.26))
+                    if variant=='A':
+                        lead=body_style.model_copy(deep=True);lead.size=_scale_size(design,22,26)
+                        nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=content_right-.06,h=.17),style=lead,text=lead_text,claim_ids=ps.claim_ids))
+                        vb=Box(x=.11,y=top+.21,w=content_right-.16,h=max(.25,.86-(top+.21)))
                     elif variant=='B':
-                        vb=Box(x=.06,y=top,w=content_right-.06,h=.38)
-                        small=body_style.model_copy(deep=True);small.size=_scale_size(design,18,18)
-                        nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.07,y=top+.42,w=content_right-.08,h=.20),style=small,text=ps.message,claim_ids=ps.claim_ids))
-                    elif long_message:
-                        nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=content_right-.06,h=.22),style=body_style,text=ps.message,claim_ids=ps.claim_ids))
-                        vb=Box(x=.06,y=top+.26,w=content_right-.06,h=.84-(top+.26))
-                    else:
-                        left=.31 if branded_slide else .35
-                        nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=left,h=.23),style=body_style,text=ps.message,claim_ids=ps.claim_ids))
-                        if supports and len(ps.message)<=90:
+                        lead=body_style.model_copy(deep=True);lead.size=_scale_size(design,20,22)
+                        left=.34 if branded_slide else .35
+                        nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=left,h=.23),style=lead,text=lead_text,claim_ids=ps.claim_ids))
+                        if supports:
                             support_style=body_style.model_copy(deep=True);support_style.size=_scale_size(design,18,18)
-                            nodes.append(Node(id=f'{ps.id}-support-1',kind='text',role='support',box=Box(x=.06,y=top+.29,w=left,h=.19),style=support_style,text=supports[0],claim_ids=ps.claim_ids))
-                        vb=Box(x=.43,y=top,w=content_right-.43,h=.50)
-                else:
-                    lead=body_style.model_copy(deep=True);lead.size=_scale_size(design,20,24 if variant=='B' else 22)
-                    lead_w=content_right-.07
-                    nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=lead_w,h=.22),style=lead,text=ps.message,claim_ids=ps.claim_ids))
-                    if supports:
+                            nodes.append(Node(id=f'{ps.id}-support-1',kind='text',role='support',box=Box(x=.06,y=top+.29,w=left,h=.20),style=support_style,text=supports[0],claim_ids=ps.claim_ids))
+                        vb=Box(x=.46,y=top,w=content_right-.46,h=.50)
+                    else:
+                        lead=body_style.model_copy(deep=True);lead.size=_scale_size(design,18,18)
+                        nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=.45,h=.17),style=lead,text=lead_text,claim_ids=ps.claim_ids))
                         support_style=body_style.model_copy(deep=True);support_style.size=_scale_size(design,18,18)
-                        cols=min(2,len(supports));col_w=(lead_w-.05)/cols
                         for idx,text in enumerate(supports[:2]):
-                            x=.06+idx*(col_w+.05)
-                            nodes.append(Node(id=f'{ps.id}-support-accent-{idx+1}',kind='text',role='accent',box=Box(x=x,y=top+.30,w=.055,h=.009),style=Style(font=body_style.font,size=18,color=accent,fill=accent),text=''))
-                            nodes.append(Node(id=f'{ps.id}-support-{idx+1}',kind='text',role='support',box=Box(x=x,y=top+.34,w=col_w,h=.20),style=support_style,text=text,claim_ids=ps.claim_ids))
-                    elif ps.takeaway and ps.takeaway.casefold()!=ps.message.casefold():
-                        takeaway_style=body_style.model_copy(deep=True);takeaway_style.size=_scale_size(design,18,18);takeaway_style.bold=True
-                        nodes.append(Node(id=f'{ps.id}-takeaway',kind='text',role='takeaway',box=Box(x=.06,y=top+.34,w=min(.55,lead_w),h=.16),style=takeaway_style,text=ps.takeaway,claim_ids=ps.claim_ids))
+                            nodes.append(Node(id=f'{ps.id}-support-{idx+1}',kind='text',role='support',box=Box(x=.06,y=top+.22+idx*.17,w=.45,h=.14),style=support_style,text=_short(text,82),claim_ids=ps.claim_ids))
+                        vb=Box(x=.57,y=top,w=.37,h=.47)
+                else:
+                    lead_w=content_right-.07
+                    if variant=='A':
+                        lead=body_style.model_copy(deep=True);lead.size=_scale_size(design,22,28)
+                        nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=lead_w,h=.34),style=lead,text=lead_text,claim_ids=ps.claim_ids))
+                    elif variant=='B':
+                        lead=body_style.model_copy(deep=True);lead.size=_scale_size(design,20,22)
+                        nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=lead_w,h=.20),style=lead,text=lead_text,claim_ids=ps.claim_ids))
+                        if supports:
+                            support_style=body_style.model_copy(deep=True);support_style.size=_scale_size(design,18,18)
+                            cols=min(2,len(supports));col_w=(lead_w-.05)/cols
+                            for idx,text in enumerate(supports[:2]):
+                                x=.06+idx*(col_w+.05)
+                                nodes.append(Node(id=f'{ps.id}-support-accent-{idx+1}',kind='text',role='accent',box=Box(x=x,y=top+.26,w=.055,h=.009),style=Style(font=body_style.font,size=18,color=accent,fill=accent),text=''))
+                                nodes.append(Node(id=f'{ps.id}-support-{idx+1}',kind='text',role='support',box=Box(x=x,y=top+.30,w=col_w,h=.21),style=support_style,text=text,claim_ids=ps.claim_ids))
+                    else:
+                        lead=body_style.model_copy(deep=True);lead.size=_scale_size(design,18,18)
+                        nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=lead_w,h=.15),style=lead,text=lead_text,claim_ids=ps.claim_ids))
+                        support_style=body_style.model_copy(deep=True);support_style.size=_scale_size(design,18,18)
+                        details=supports[:3] or ([ps.takeaway] if ps.takeaway else [])
+                        cols=max(1,len(details));col_w=(lead_w-.04*(cols-1))/cols
+                        for idx,text in enumerate(details):
+                            x=.06+idx*(col_w+.04)
+                            nodes.append(Node(id=f'{ps.id}-support-accent-{idx+1}',kind='text',role='accent',box=Box(x=x,y=top+.19,w=.045,h=.008),style=Style(font=body_style.font,size=18,color=accent,fill=accent),text=''))
+                            nodes.append(Node(id=f'{ps.id}-support-{idx+1}',kind='text',role='support',box=Box(x=x,y=top+.22,w=col_w,h=.24),style=support_style,text=_short(text,86),claim_ids=ps.claim_ids))
             if visual!='none' and not is_cover and not last:
                 kind='diagram' if visual in {'sequence','list','hierarchy'} else visual
-                data=datasets[ps.dataset_id].model_dump() if ps.dataset_id else assets[ps.asset_id].model_dump() if ps.asset_id else {'layout':visual,'items':_diagram_items(ps,claims),'accent':accent,'surface':surface}
+                items=_diagram_items(ps,claims)[:{'A':2,'B':3,'C':4}[variant]]
+                data=datasets[ps.dataset_id].model_dump() if ps.dataset_id else assets[ps.asset_id].model_dump() if ps.asset_id else {'layout':visual,'items':items,'accent':accent,'surface':surface}
                 visualstyle=_style(style_body,design,p.background);visualstyle.size=_scale_size(design,18,18)
                 visualstyle.fill=surface
                 nodes.append(Node(id=f'{ps.id}-visual',kind=kind,role='visual',box=vb,style=visualstyle,data=data,claim_ids=ps.claim_ids if kind=='diagram' else []))

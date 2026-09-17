@@ -49,8 +49,8 @@ class Pipeline:
         def stage(name):self.store.owned_update(job.id,job.lease_owner,stage=name)
         stage('loading')
         if job.kind=='compose':return self._compose(job,payload,folder,started,stage)
-        parentresult=None;regenerate=None
-        if job.kind in {'repair','regenerate_slide'}:
+        parentresult=None;regenerate=None;recompose=False
+        if job.kind in {'repair','regenerate_slide','recompose'}:
             parent=self.store.job(payload['parent_job_id']);parentresult=json.loads(parent.result)
             if parent.state!='ready':raise ValueError('Parent job is not ready')
             original=GenerateRequest.model_validate(parentresult['request'])
@@ -59,11 +59,12 @@ class Pipeline:
                 old=parentresult['variants'][request.variant]
                 scene=SceneIR.model_validate_json(artifact_path(old['scene']).read_bytes())
                 report=AuditReport.model_validate_json(artifact_path(old['audit']).read_bytes())
-            else:regenerate=RegenerateSlideRequest.model_validate(payload['request'])
+            elif job.kind=='regenerate_slide':regenerate=RegenerateSlideRequest.model_validate(payload['request'])
+            else:recompose=True
         else:original=GenerateRequest.model_validate(payload)
         tr=self.store.record(original.template_id,'template');cr=self.store.record(original.content_id,'content')
         template=artifact_path(tr.path).read_bytes()
-        if regenerate:
+        if regenerate or recompose:
             design=DesignIR.model_validate_json(artifact_path(parentresult['artifacts']['design']).read_bytes())
             content=ContentIR.model_validate_json(artifact_path(parentresult['artifacts']['content']).read_bytes())
             from .contracts import PresentationPlan
@@ -88,6 +89,8 @@ class Pipeline:
             else:revised.asset_id=None
             plan.slides[index]=revised;plan=enrich_plan(plan,content)
             write_json(folder/'plan.json',plan.model_dump());scenes=build_scenes(design,content,plan,job.id)
+        elif recompose:
+            plan=enrich_plan(plan,content);write_json(folder/'plan.json',plan.model_dump());scenes=build_scenes(design,content,plan,job.id)
         else:
             before=time.monotonic();plan=plan_with_model(self.gateway,content,original);timings['planning']=time.monotonic()-before
             if original.generate_images:
@@ -185,7 +188,7 @@ class Pipeline:
         return {'version':scene.version,'scene':rel(sp),'audit':rel(ap),'pptx':rel(pptx),'pdf':rel(pdf),'html':rel(html),'previews':[rel(p) for p in previews],'issue_count':sum(i.status=='fail' for i in report.issues)}
 
     def _slide_options(self,plan,variants,selection,scores,reasons):
-        labels={'A':'Последовательная','B':'Визуальная','C':'Сравнительная'};result=[]
+        labels={'A':'Крупно и кратко','B':'Сбалансированно','C':'Подробно'};result=[]
         for index,slide in enumerate(plan.slides):
             options={v:{'label':labels[v],'preview':variants[v]['previews'][index],'score':scores.get(slide.id,{}).get(v,0),'reasons':reasons.get(slide.id,{}).get(v,{})} for v in ('A','B','C')}
             result.append({'id':slide.id,'title':slide.title,'archetype':slide.archetype,'lead':slide.message,'support_points':slide.support_points,'takeaway':slide.takeaway,'selected':selection.get(slide.id,'A'),'options':options})

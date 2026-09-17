@@ -145,6 +145,15 @@ def export_selection(jid:str,request:ExportRequest):
     return {'id':store().enqueue('compose',{'parent_job_id':jid,'request':request.model_dump()})}
 
 
+@app.post('/api/jobs/{jid}/recompose',status_code=202)
+def recompose(jid:str):
+    parent=store().job(jid)
+    if parent.state!='ready':raise HTTPException(409,'Job is not ready')
+    result=json.loads(parent.result)
+    if not result.get('artifacts',{}).get('plan'):raise ValueError('Presentation plan is unavailable')
+    return {'id':store().enqueue('recompose',{'parent_job_id':jid})}
+
+
 @app.post('/api/jobs/{jid}/regenerate-slide',status_code=202)
 def regenerate_slide(jid:str,request:RegenerateSlideRequest):
     parent=store().job(jid)
