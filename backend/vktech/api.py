@@ -8,7 +8,7 @@ from fastapi import FastAPI,UploadFile,HTTPException,Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from .contracts import GenerateRequest,RepairRequest,DesignIR,ContentIR
+from .contracts import GenerateRequest,RepairRequest,SelectionRequest,RegenerateSlideRequest,DesignIR,ContentIR
 from .template import import_template
 from .content import import_content
 from .settings import artifact_path,ROOT,config
@@ -127,11 +127,31 @@ def repair(jid:str,request:RepairRequest):
     return {'id':store().enqueue('repair',{'parent_job_id':jid,'request':request.model_dump()},dedup_key=jid+':'+request.idempotency_key)}
 
 
+@app.post('/api/jobs/{jid}/select',status_code=202)
+def select_slide(jid:str,request:SelectionRequest):
+    parent=store().job(jid)
+    if parent.state!='ready':raise HTTPException(409,'Job is not ready')
+    result=json.loads(parent.result)
+    if request.slide_id not in result.get('selection',{}):raise ValueError('Unknown slide ID')
+    return {'id':store().enqueue('compose',{'parent_job_id':jid,'request':request.model_dump()})}
+
+
+@app.post('/api/jobs/{jid}/regenerate-slide',status_code=202)
+def regenerate_slide(jid:str,request:RegenerateSlideRequest):
+    parent=store().job(jid)
+    if parent.state!='ready':raise HTTPException(409,'Job is not ready')
+    result=json.loads(parent.result)
+    if request.slide_id not in result.get('selection',{}):raise ValueError('Unknown slide ID')
+    return {'id':store().enqueue('regenerate_slide',{'parent_job_id':jid,'request':request.model_dump()})}
+
+
 def job_files(jid):
     j=store().job(jid)
     if j.state!='ready':raise HTTPException(409,'Exports are not ready')
     result=json.loads(j.result);allowed={result['manifest']}
     for v in result['variants'].values():allowed.update(v[k] for k in ('scene','audit','pptx','pdf','html'));allowed.update(v['previews'])
+    if result.get('presentation'):
+        v=result['presentation'];allowed.update(v[k] for k in ('scene','audit','pptx','pdf','html'));allowed.update(v['previews'])
     return allowed
 
 

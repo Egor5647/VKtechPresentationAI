@@ -92,7 +92,9 @@ class ModelGateway:
     def structured(self, role: str, payload: dict, schema: type[BaseModel], images: list[Path] | None = None):
         if not self.url:
             raise ModelUnavailable("Configure VK_BASE_URL for final or MODEL_BASE_URL for selection. No model was called.")
-        prompt = (ROOT / "prompts" / ("plan.txt" if role == "planning" else "audit.txt")).read_text()
+        prompt_name={'planning':'plan.txt','vision_audit':'audit.txt','regenerate_slide':'regenerate_slide.txt'}.get(role)
+        if not prompt_name:raise ValueError(f'Unsupported structured role: {role}')
+        prompt = (ROOT / "prompts" / prompt_name).read_text()
         output_schema = response_schema(role, payload, schema)
         cache=self._cache_path('structured',[role.encode(),self.model.encode(),prompt.encode(),json.dumps(payload,ensure_ascii=False,sort_keys=True).encode(),json.dumps(output_schema,sort_keys=True).encode(),*[Path(p).read_bytes() for p in images or []]])
         if self.cache_enabled and cache.exists():

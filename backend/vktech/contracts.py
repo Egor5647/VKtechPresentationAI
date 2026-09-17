@@ -114,6 +114,10 @@ class PlanSlide(Contract):
     asset_id: str | None = None
     visual: Literal["none", "chart", "table", "sequence", "list", "hierarchy", "image"] = "none"
     role: Literal["cover", "content", "divider"] = "content"
+    archetype: Literal["cover", "divider", "explanation", "comparison", "process", "example", "formula", "exercise", "summary", "illustration"] = "explanation"
+    support_points: list[str] = Field(default_factory=list, max_length=3)
+    takeaway: str = Field(default="", max_length=180)
+    visual_brief: str = Field(default="", max_length=300)
 
 
 class PresentationPlan(Contract):
@@ -208,3 +212,23 @@ class RepairRequest(Contract):
     expected_version: int = Field(ge=1)
     issue_ids: list[str] = Field(min_length=1)
     idempotency_key: str = Field(min_length=8, max_length=100)
+
+
+class SelectionRequest(Contract):
+    slide_id: str = Field(min_length=1, max_length=100)
+    variant: Literal["A", "B", "C"]
+
+
+class RegenerateSlideRequest(Contract):
+    slide_id: str = Field(min_length=1, max_length=100)
+    instruction: str = Field(default="Сделай слайд выразительнее и плотнее, сохрани все факты.", min_length=1, max_length=500)
+
+
+class SlideRevision(Contract):
+    title: str = Field(min_length=1, max_length=100)
+    message: str = Field(min_length=1, max_length=360)
+    support_points: list[str] = Field(default_factory=list, max_length=3)
+    takeaway: str = Field(default="", max_length=180)
+    visual: Literal["none", "sequence", "list", "hierarchy"] = "none"
+    archetype: Literal["divider", "explanation", "comparison", "process", "example", "formula", "exercise", "summary", "illustration"] = "explanation"
+    visual_brief: str = Field(default="", max_length=300)

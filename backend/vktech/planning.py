@@ -4,7 +4,7 @@ import logging
 import os
 import re
 from .settings import artifact_path
-from .contracts import PresentationPlan, ContentIR, DesignIR, SceneIR, SceneSlide, Node, Style, Box
+from .contracts import PresentationPlan, ContentIR, DesignIR, SceneIR, SceneSlide, Node, Style, Box, SlideRevision
 
 log=logging.getLogger(__name__)
 
@@ -58,12 +58,46 @@ def normalize_plan(plan: PresentationPlan) -> PresentationPlan:
     return result
 
 
+def _archetype(slide,index=0,count=1):
+    text=(slide.title+' '+slide.message).lower()
+    if slide.role=='cover' or index==0:return 'cover'
+    if slide.role=='divider':return 'divider'
+    if index==count-1 or re.search(r'вывод|итог|заключен|резюме',text):return 'summary'
+    if re.search(r'задач|упражнен|самопровер|домашн',text):return 'exercise'
+    if slide.visual=='image':return 'illustration'
+    if re.search(r'формул|теорем|оценк|границ|θ\s*\(|o\s*\(',text,re.I):return 'formula'
+    if re.search(r'пример|case|сценари',text):return 'example'
+    if slide.visual=='sequence' or re.search(r'этап|алгоритм|процесс|порядок|scheduler',text):return 'process'
+    if slide.visual=='list' or re.search(r'различ|сравн|versus| vs\b|режим',text):return 'comparison'
+    return 'explanation'
+
+
+def enrich_plan(plan: PresentationPlan,content: ContentIR) -> PresentationPlan:
+    """Add a source-backed editorial structure used by the layout director."""
+    result=plan.model_copy(deep=True);claims={c.id:c for c in content.claims}
+    for index,slide in enumerate(result.slides):
+        slide.archetype=_archetype(slide,index,len(result.slides))
+        if not slide.support_points:slide.support_points=_supporting_points(slide,claims,3)
+        slide.support_points=[_short(point,105) for point in slide.support_points[:3] if point.strip()]
+        if not slide.takeaway:
+            sentences=[x.strip() for x in re.split(r'(?<=[.!?])\s+',slide.message) if x.strip()]
+            slide.takeaway=_short(sentences[-1] if sentences else slide.message,150)
+        else:slide.takeaway=_short(slide.takeaway,150)
+        if not slide.visual_brief:
+            slide.visual_brief=_short(slide.title+': '+slide.message,260)
+        else:slide.visual_brief=_short(slide.visual_brief,260)
+        # The lead is an editorial summary. Details remain in the source-backed
+        # support points and claim references instead of overflowing one box.
+        slide.message=_short(slide.message,150 if slide.archetype in {'cover','summary'} else 185)
+    return result
+
+
 def validate_plan(plan: PresentationPlan, content: ContentIR, count: int):
     if plan.status=='needs_input': raise NeedsInput(plan.reason)
     if len(plan.slides)!=count: raise ValueError('Model did not preserve requested slide count')
     if len({s.id for s in plan.slides})!=count: raise ValueError('Duplicate slide IDs')
     claims={c.id for c in content.claims}; datasets={d.id for d in content.datasets}; assets={a.id for a in content.assets}
-    used=set()
+    used=set();fingerprints=set();claim_sets={}
     source_numbers=set(re.findall(r'\d+(?:[.,]\d+)?', ' '.join(c.text for c in content.claims)+ ' '.join(str(x) for d in content.datasets for v in d.series.values() for x in v)))
     for slide in plan.slides:
         if not set(slide.claim_ids)<=claims: raise ValueError('Unknown claim reference')
@@ -71,7 +105,15 @@ def validate_plan(plan: PresentationPlan, content: ContentIR, count: int):
         if slide.asset_id and slide.asset_id not in assets: raise ValueError('Unknown asset reference')
         if slide.visual in {'chart','table'} and not slide.dataset_id: raise ValueError('Numeric visuals require a source dataset')
         if slide.visual=='image' and not slide.asset_id: raise ValueError('Image visual requires an asset')
-        invented=set(re.findall(r'\d+(?:[.,]\d+)?',slide.title+' '+slide.message))-source_numbers
+        fingerprint=(re.sub(r'\W+',' ',slide.title.casefold()).strip(),re.sub(r'\W+',' ',slide.message.casefold()).strip())
+        if fingerprint in fingerprints:raise ValueError('Plan contains duplicate slides: '+slide.title)
+        fingerprints.add(fingerprint)
+        claim_signature=tuple(sorted(slide.claim_ids))
+        if claim_signature:
+            claim_sets[claim_signature]=claim_sets.get(claim_signature,0)+1
+            if claim_sets[claim_signature]>2:raise ValueError('Plan repeats the same source set on more than two slides')
+        visible=' '.join([slide.title,slide.message,slide.takeaway,*slide.support_points])
+        invented=set(re.findall(r'\d+(?:[.,]\d+)?',visible))-source_numbers
         if invented: raise ValueError('Plan introduces numbers absent from source: '+', '.join(sorted(invented)))
         used.update(slide.claim_ids)
     required={c.id for c in content.claims if c.required}
@@ -118,7 +160,7 @@ def plan_with_model(gateway,content,request):
             plan=normalize_plan(gateway.structured('planning',payload,PresentationPlan,images=model_images))
             try:
                 validate_plan(plan,content,request.slide_count)
-                return plan
+                return enrich_plan(plan,content)
             except NeedsInput:
                 raise
             except ValueError as exc:
@@ -128,6 +170,20 @@ def plan_with_model(gateway,content,request):
                     payload['validation_feedback']=str(exc)
                     payload['correction']='Return a complete corrected plan. Every required_claim_id must occur in at least one slide.claim_ids.'
         raise error
+
+
+def regenerate_slide_with_model(gateway,slide,content,instruction):
+    claims={c.id:c for c in content.claims};selected=[claims[cid] for cid in slide.claim_ids if cid in claims]
+    payload={'instruction':instruction,'current_slide':slide.model_dump(),'claims':[c.model_dump() for c in selected]}
+    revision=gateway.structured('regenerate_slide',payload,SlideRevision)
+    source_numbers=set(re.findall(r'\d+(?:[.,]\d+)?',' '.join(c.text for c in selected)))
+    visible=' '.join([revision.title,revision.message,revision.takeaway,*revision.support_points])
+    invented=set(re.findall(r'\d+(?:[.,]\d+)?',visible))-source_numbers
+    if invented:raise ValueError('Slide regeneration introduces numbers absent from source: '+', '.join(sorted(invented)))
+    result=slide.model_copy(deep=True)
+    for field in ('title','message','support_points','takeaway','visual','archetype','visual_brief'):
+        setattr(result,field,getattr(revision,field))
+    return result
 
 
 def usable_prototypes(design):
@@ -327,15 +383,15 @@ def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, j
                 p=plain[(si+vi)%min(3,len(plain))]
             title_style=_style(style_title.style,design,p.background,'title')
             body_style=_style(style_body,design,p.background)
-            supports=_supporting_points(ps,claims,3)
+            supports=ps.support_points or _supporting_points(ps,claims,3)
             nodes=[]
             if is_cover or last:
                 title_style.size=_scale_size(design,36,48);body_style.size=_scale_size(design,20,24)
                 title_style.align=body_style.align='left';body_style.bold=True
                 if _dark_background(p.background):title_style.color=body_style.color='FFFFFF'
                 cover_w=.58 if p in branded else .88
-                nodes.append(Node(id=f'{ps.id}-title',kind='text',role='title',box=Box(x=.06,y=.20,w=cover_w,h=.38),style=title_style,text=ps.title))
-                nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=.64,w=cover_w,h=.18),style=body_style,text=ps.message,claim_ids=ps.claim_ids))
+                nodes.append(Node(id=f'{ps.id}-title',kind='text',role='title',box=Box(x=.06,y=.18,w=cover_w,h=.36),style=title_style,text=ps.title))
+                nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=.59,w=cover_w,h=.29),style=body_style,text=ps.message,claim_ids=ps.claim_ids))
             else:
                 branded_slide=p in branded
                 content_right=.70 if branded_slide else .94
@@ -381,6 +437,9 @@ def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, j
                             x=.06+idx*(col_w+.05)
                             nodes.append(Node(id=f'{ps.id}-support-accent-{idx+1}',kind='text',role='accent',box=Box(x=x,y=top+.30,w=.055,h=.009),style=Style(font=body_style.font,size=18,color=accent,fill=accent),text=''))
                             nodes.append(Node(id=f'{ps.id}-support-{idx+1}',kind='text',role='support',box=Box(x=x,y=top+.34,w=col_w,h=.20),style=support_style,text=text,claim_ids=ps.claim_ids))
+                    elif ps.takeaway and ps.takeaway.casefold()!=ps.message.casefold():
+                        takeaway_style=body_style.model_copy(deep=True);takeaway_style.size=_scale_size(design,18,18);takeaway_style.bold=True
+                        nodes.append(Node(id=f'{ps.id}-takeaway',kind='text',role='takeaway',box=Box(x=.06,y=top+.34,w=min(.55,lead_w),h=.16),style=takeaway_style,text=ps.takeaway,claim_ids=ps.claim_ids))
             if visual!='none' and not is_cover and not last:
                 kind='diagram' if visual in {'sequence','list','hierarchy'} else visual
                 data=datasets[ps.dataset_id].model_dump() if ps.dataset_id else assets[ps.asset_id].model_dump() if ps.asset_id else {'layout':visual,'items':_diagram_items(ps,claims),'accent':accent,'surface':surface}

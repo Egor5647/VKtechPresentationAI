@@ -3,13 +3,15 @@ import shutil
 import pytest
 from pptx import Presentation
 from vktech.template import import_template
-from vktech.planning import NeedsInput,build_scenes,validate_plan,plan_with_model,normalize_plan,planning_claims
+from vktech.planning import NeedsInput,build_scenes,validate_plan,plan_with_model,normalize_plan,planning_claims,enrich_plan
 from vktech.export import export_pptx,export_html
 from vktech.opc import Package
 from vktech.audit import audit_scene,repair_scene,contrast
 from vktech.contracts import RepairRequest,GenerateRequest
 from vktech.store import Store,Job
 from vktech.worker import execute
+from vktech.selection import choose_variants,compose_scene
+from vktech.settings import artifact_path
 from conftest import FixtureGateway
 
 
@@ -57,6 +59,8 @@ def test_plan_cannot_drop_facts_or_invent_numbers(content,plan):
     with pytest.raises(ValueError,match='omits'):validate_plan(broken,content,12)
     broken=plan.model_copy(deep=True);broken.slides[0].title='Рост 999%'
     with pytest.raises(ValueError,match='numbers'):validate_plan(broken,content,12)
+    broken=plan.model_copy(deep=True);broken.slides[1].title=broken.slides[0].title;broken.slides[1].message=broken.slides[0].message
+    with pytest.raises(ValueError,match='duplicate'):validate_plan(broken,content,12)
 
 
 def test_incomplete_optional_visual_intent_is_removed(plan):
@@ -73,6 +77,20 @@ def test_normalized_plan_has_native_visual_quota(plan):
     assert len(native)>=round(len(content_slides)*.4)
 
 
+def test_candidate_selection_and_composition(template_bytes,content,plan):
+    scenes=build_scenes(import_template(template_bytes),content,enrich_plan(plan,content),'selection')
+    slide_ids=[slide.id for slide in scenes[0].slides]
+    scores={slide_id:{'A':80,'B':82,'C':79} for slide_id in slide_ids}
+    selected=choose_variants(scores,slide_ids)
+    assert set(selected)==set(slide_ids)
+    assert len(set(selected.values()))>1
+    composed=compose_scene(scenes,selected,'selected')
+    for index,slide in enumerate(composed.slides):
+        source=next(scene for scene in scenes if scene.variant==selected[slide.id])
+        assert slide==source.slides[index]
+    assert composed.variant=='selected'
+
+
 def test_planner_retries_with_missing_claim_feedback(content,plan):
     class Gateway:
         def __init__(self):self.payloads=[]
@@ -82,7 +100,7 @@ def test_planner_retries_with_missing_claim_feedback(content,plan):
                 incomplete=plan.model_copy(deep=True);incomplete.slides[-1].claim_ids=[];return incomplete
             return plan
     gateway=Gateway();request=GenerateRequest(template_id='template',content_id='content',brief='test')
-    assert plan_with_model(gateway,content,request)==normalize_plan(plan)
+    assert plan_with_model(gateway,content,request)==enrich_plan(normalize_plan(plan),content)
     assert len(gateway.payloads)==2
     assert 'omits mandatory claims' in gateway.payloads[1]['validation_feedback']
     assert set(gateway.payloads[0]['required_claim_ids'])=={c.id for c in content.claims if c.required}
@@ -148,8 +166,19 @@ def test_end_to_end_worker(template_bytes,content,plan,tmp_path,monkeypatch):
     execute(store,store.claim(),FixtureGateway(plan))
     job=store.job(jid);assert job.state=='ready',job.error
     result=json.loads(job.result);assert len(result['variants'])==3
+    assert len(result['slides'])==12 and len(result['selection'])==12
+    assert set(result['selection'].values())<= {'A','B','C'}
+    assert all(len(slide['options'])==3 for slide in result['slides'])
+    assert all(artifact_path(result['presentation'][key]).exists() for key in ('pptx','pdf','html','audit','scene'))
     for v in result['variants'].values():
-        from vktech.settings import artifact_path
         assert all(artifact_path(v[k]).exists() for k in ('pptx','pdf','html','audit','scene'))
         audit=json.loads(artifact_path(v['audit']).read_text())
         assert any(i['category']=='contextual' and i['status']=='unknown' for i in audit['issues'])
+    slide_id=result['slides'][0]['id'];before=result['selection'][slide_id]
+    replacement=next(candidate for candidate in ('A','B','C') if candidate!=before)
+    child=store.enqueue('compose',{'parent_job_id':jid,'request':{'slide_id':slide_id,'variant':replacement}})
+    execute(store,store.claim(),FixtureGateway(plan))
+    composed=json.loads(store.job(child).result)
+    assert composed['selection'][slide_id]==replacement
+    assert composed['slides'][0]['selected']==replacement
+    assert artifact_path(composed['presentation']['pptx']).exists()
