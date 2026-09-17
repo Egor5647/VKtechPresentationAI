@@ -70,6 +70,18 @@ def test_plan_rejects_repeated_title_or_main_idea(content,plan):
     with pytest.raises(ValueError,match='main idea'):validate_plan(repeated_message,content,12)
 
 
+def test_plan_rejects_mechanically_truncated_text(content,plan):
+    broken=plan.model_copy(deep=True);broken.slides[0].message='Мысль механически оборвана…'
+    with pytest.raises(ValueError,match='truncated'):validate_plan(broken,content,12)
+
+
+def test_plan_rejects_text_that_cannot_fit_density_modes(content,plan):
+    broken=plan.model_copy(deep=True);broken.slides[0].message='Очень длинная главная мысль, которая остаётся законченным предложением, но значительно превышает безопасную длину для подробной компоновки и поэтому должна быть семантически переформулирована моделью целиком, без обрезания отдельных слов, фактов, чисел, оговорок и смысловых связей.'
+    with pytest.raises(ValueError,match='220 characters'):validate_plan(broken,content,12)
+    broken=plan.model_copy(deep=True);broken.slides[0].takeaway='Слишком длинный вывод сохраняет грамматическую завершённость, однако уже не подходит для крупного режима и поэтому должен быть полностью переформулирован моделью без механического удаления слов.'
+    with pytest.raises(ValueError,match='130 characters'):validate_plan(broken,content,12)
+
+
 def test_incomplete_optional_visual_intent_is_removed(plan):
     broken=plan.model_copy(deep=True);broken.slides[0].visual='image';broken.slides[0].asset_id=None
     fixed=normalize_plan(broken)
@@ -108,6 +120,19 @@ def test_variants_have_distinct_density_and_type_scale(template_bytes,content,pl
     assert len(slides[0].nodes)<len(slides[1].nodes)<len(slides[2].nodes)
 
 
+def test_variants_use_complete_semantic_text_without_ellipsis(template_bytes,content,plan):
+    structured=enrich_plan(plan,content);target=structured.slides[1]
+    target.message='Полная главная мысль объясняет факт целиком. Второе предложение добавляет контекст.'
+    target.takeaway='Короткая версия сохраняет основную мысль целиком.'
+    target.support_points=['Первый законченный подтверждающий тезис.','Второй законченный подтверждающий тезис.']
+    scenes=build_scenes(import_template(template_bytes),content,structured,'semantic')
+    leads=[next(node.text for node in scene.slides[1].nodes if node.role=='body') for scene in scenes]
+    assert leads[0]==target.takeaway
+    assert leads[1]==target.takeaway
+    assert leads[2]==target.message
+    assert all('…' not in lead and '...' not in lead for lead in leads)
+
+
 def test_planner_retries_with_missing_claim_feedback(content,plan):
     class Gateway:
         def __init__(self):self.payloads=[]
@@ -121,6 +146,18 @@ def test_planner_retries_with_missing_claim_feedback(content,plan):
     assert len(gateway.payloads)==2
     assert 'omits mandatory claims' in gateway.payloads[1]['validation_feedback']
     assert set(gateway.payloads[0]['required_claim_ids'])=={c.id for c in content.claims if c.required}
+
+
+def test_planner_assigns_stable_ids_instead_of_retrying_model_metadata(content,plan):
+    duplicate_ids=plan.model_copy(deep=True)
+    for slide in duplicate_ids.slides:slide.id='slide'
+    class Gateway:
+        def __init__(self):self.calls=0
+        def structured(self,role,payload,schema,images=None):self.calls+=1;return duplicate_ids
+    gateway=Gateway();request=GenerateRequest(template_id='template',content_id='content',brief='test')
+    result=plan_with_model(gateway,content,request)
+    assert [slide.id for slide in result.slides]==[f'slide-{index}' for index in range(1,13)]
+    assert gateway.calls==1
 
 
 def test_planner_does_not_retry_a_model_request_for_missing_input(content):
