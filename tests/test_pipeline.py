@@ -44,6 +44,19 @@ def test_scene_uses_model_summary_with_source_traceability(template_bytes,conten
     assert body.claim_ids==concise.slides[0].claim_ids
 
 
+def test_missing_template_font_uses_configured_fallback(template_bytes,content,plan,monkeypatch):
+    design=import_template(template_bytes)
+    for prototype in design.prototypes:
+        for slot in prototype.slots:slot.style.font='Unavailable Corporate Font'
+    design.fonts=['Unavailable Corporate Font']
+    monkeypatch.setenv('FONT_FALLBACK','Arial')
+    import vktech.audit as audit
+    from PIL import ImageFont
+    monkeypatch.setattr(audit,'font_for',lambda name,size: ImageFont.load_default(size=size) if name=='Arial' else None)
+    scene=build_scenes(design,content,plan,'fallback')[0]
+    assert all(node.style.font=='Arial' for slide in scene.slides for node in slide.nodes if node.kind=='text' and node.role!='accent')
+
+
 def test_plan_cannot_drop_facts_or_invent_numbers(content,plan):
     broken=plan.model_copy(deep=True);broken.slides[-1].claim_ids=[]
     with pytest.raises(ValueError,match='omits'):validate_plan(broken,content,12)

@@ -1,6 +1,8 @@
 from __future__ import annotations
 import hashlib
+import os
 import re
+from functools import lru_cache
 from pathlib import Path
 from PIL import ImageFont
 from .contracts import AuditReport, Issue, ContextualReport, ContextualFailureReport
@@ -25,9 +27,15 @@ def contrast(a,b):
 
 
 def font_for(name,size):
-    # Explicit paths are provided by deployment; never assume embedded PPTX fonts are installed.
-    import os
-    directories=[Path(p) for p in os.environ.get('FONT_DIRS','').split(os.pathsep) if p]
+    configured=tuple(p for p in os.environ.get('FONT_DIRS','').split(os.pathsep) if p)
+    system=('/Library/Fonts','/System/Library/Fonts','/System/Library/Fonts/Supplemental',str(Path.home()/'Library/Fonts'))
+    return _font_for(name,size,configured+system)
+
+
+@lru_cache(maxsize=256)
+def _font_for(name,size,directories):
+    """Resolve an installed font from explicit and standard macOS directories."""
+    directories=[Path(p) for p in directories if Path(p).is_dir()]
     for directory in directories:
         for path in sorted(directory.glob('**/*')):
             if path.suffix.lower() in {'.ttf','.otf'}:
@@ -81,7 +89,8 @@ def audit_scene(scene,design,content,opened=False):
                 h=text_height(n,scene) if n.text.strip() else 0
                 if h is None:add('D03',[n],status='unknown',category='environment',message=f'Font {n.style.font} is unavailable; text fit is unverified')
                 elif h>b.h:add('D03',[n],repair='fit_text',evidence={'measured_height':h,'available_height':b.h})
-                if n.style.font not in design.fonts:add('D08',[n])
+                allowed_fonts={*design.fonts,os.environ.get('FONT_FALLBACK','Arial')}
+                if n.style.font not in allowed_fonts:add('D08',[n])
                 if n.style.size not in design.font_sizes:add('D09',[n])
                 if n.style.color not in design.palette:add('D10',[n])
                 if n.text.strip():

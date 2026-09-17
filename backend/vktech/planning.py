@@ -171,6 +171,9 @@ def _readable_color(color,background,design,threshold=4.5):
 
 def _style(base,design,background,role='body',align='left'):
     result=base.model_copy(deep=True);result.align=align;result.fill=None
+    from .audit import font_for
+    fallback=os.environ.get('FONT_FALLBACK','Arial')
+    if font_for(result.font,18) is None and font_for(fallback,18) is not None:result.font=fallback
     result.size=_scale_size(design,28,34 if role=='title' else 20) if role=='title' else _scale_size(design,18,20)
     result.bold=role=='title';result.color=_readable_color(result.color,background,design,3 if role=='title' else 4.5)
     return result
@@ -270,18 +273,23 @@ def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, j
                 body_style.size=_scale_size(design,20,24);body_style.align='center'
                 nodes=[Node(id=f'{ps.id}-accent',kind='text',role='accent',box=Box(x=.08,y=.12,w=.16,h=.015),style=Style(font=body_style.font,size=18,color=accent,fill=accent),text=''),Node(id=f'{ps.id}-title',kind='text',role='title',box=Box(x=.08,y=.17,w=.84,h=.31),style=title_style,text=ps.title),Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.15,y=.55,w=.70,h=.20),style=body_style,text=ps.message,claim_ids=ps.claim_ids)]
             else:
-                nodes=[Node(id=f'{ps.id}-title',kind='text',role='title',box=Box(x=.07,y=.07,w=.86,h=.19),style=title_style,text=ps.title),Node(id=f'{ps.id}-accent',kind='text',role='accent',box=Box(x=.07,y=.265,w=.12,h=.012),style=Style(font=body_style.font,size=18,color=accent,fill=accent),text='')]
+                title_h=.26 if len(ps.title)>55 else .19
+                accent_y=.07+title_h+.005
+                nodes=[Node(id=f'{ps.id}-title',kind='text',role='title',box=Box(x=.07,y=.07,w=.86,h=title_h),style=title_style,text=ps.title),Node(id=f'{ps.id}-accent',kind='text',role='accent',box=Box(x=.07,y=accent_y,w=.12,h=.012),style=Style(font=body_style.font,size=18,color=accent,fill=accent),text='')]
             visual=ps.visual
             if ps.dataset_id: visual='table' if variant=='C' else 'chart'
             if ps.role!='cover':
+                content_top=max(.29,nodes[0].box.y+nodes[0].box.h+.03)
                 if visual!='none' and variant=='A':
-                    nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.08,y=.29,w=.84,h=.23),style=body_style,text=ps.message,claim_ids=ps.claim_ids));vb=Box(x=.08,y=.57,w=.84,h=.28)
+                    body_bottom=.52;visual_top=max(.57,content_top+.18)
+                    nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.08,y=content_top,w=.84,h=max(.12,body_bottom-content_top)),style=body_style,text=ps.message,claim_ids=ps.claim_ids));vb=Box(x=.08,y=visual_top,w=.84,h=.85-visual_top)
                 elif visual!='none' and variant=='B':
                     small=body_style.model_copy(deep=True);small.size=_scale_size(design,18,18);small.align='center'
-                    nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.12,y=.72,w=.76,h=.17),style=small,text=ps.message,claim_ids=ps.claim_ids));vb=Box(x=.08,y=.29,w=.84,h=.37)
+                    nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.12,y=.72,w=.76,h=.17),style=small,text=ps.message,claim_ids=ps.claim_ids));vb=Box(x=.08,y=content_top,w=.84,h=.66-content_top)
                 elif visual!='none':
                     body_style.fill=surface
-                    nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.07,y=.31,w=.36,h=.48),style=body_style,text=ps.message,claim_ids=ps.claim_ids));vb=Box(x=.50,y=.31,w=.43,h=.48)
+                    compare_top=max(.31,content_top)
+                    nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.07,y=compare_top,w=.36,h=.79-compare_top),style=body_style,text=ps.message,claim_ids=ps.claim_ids));vb=Box(x=.50,y=compare_top,w=.43,h=.79-compare_top)
                 else:
                     body_style.size=_scale_size(design,20,24 if variant=='B' else 20);body_style.align='center' if variant=='B' else 'left'
                     body_style.fill=surface
