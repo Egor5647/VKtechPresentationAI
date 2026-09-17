@@ -63,6 +63,13 @@ def test_plan_cannot_drop_facts_or_invent_numbers(content,plan):
     with pytest.raises(ValueError,match='duplicate'):validate_plan(broken,content,12)
 
 
+def test_plan_rejects_repeated_title_or_main_idea(content,plan):
+    repeated_title=plan.model_copy(deep=True);repeated_title.slides[1].title=repeated_title.slides[0].title
+    with pytest.raises(ValueError,match='title'):validate_plan(repeated_title,content,12)
+    repeated_message=plan.model_copy(deep=True);repeated_message.slides[1].message=repeated_message.slides[0].message
+    with pytest.raises(ValueError,match='main idea'):validate_plan(repeated_message,content,12)
+
+
 def test_incomplete_optional_visual_intent_is_removed(plan):
     broken=plan.model_copy(deep=True);broken.slides[0].visual='image';broken.slides[0].asset_id=None
     fixed=normalize_plan(broken)
@@ -126,6 +133,29 @@ def test_planner_does_not_retry_a_model_request_for_missing_input(content):
     with pytest.raises(NeedsInput,match='Нужны исходные данные'):
         plan_with_model(gateway,content,request)
     assert gateway.calls==1
+
+
+def test_long_deck_is_planned_in_source_ordered_batches(content):
+    from vktech.contracts import Claim,ContentIR,PlanSlide,PresentationPlan
+    claims=[Claim(id=f'claim-long-{index}',text=f'Уникальный учебный факт {index}',source=f'source-{index}',required=False) for index in range(18)]
+    long_content=ContentIR(id='long',title='long',claims=claims)
+    class Gateway:
+        def __init__(self):self.payloads=[]
+        def structured(self,role,payload,schema,images=None):
+            self.payloads.append(payload)
+            available={claim['id']:claim for claim in payload['content']['claims']};segment=payload['plan_segment']['index']
+            slides=[]
+            for index,assignment in enumerate(payload['slide_assignments']):
+                claim=available[assignment['claim_ids'][0]]
+                marker=chr(1040+(segment-1)*6+index)
+                slides.append(PlanSlide(id=f'local-{index}',title=f'Уникальная тема {marker}',message=f'Отдельная главная мысль {marker}',claim_ids=assignment['claim_ids']))
+            return PresentationPlan(slides=slides)
+    gateway=Gateway();request=GenerateRequest(template_id='template',content_id='content',brief='test',slide_count=18)
+    result=plan_with_model(gateway,long_content,request)
+    assert len(result.slides)==18
+    assert [slide.id for slide in result.slides]==[f'slide-{index}' for index in range(1,19)]
+    assert len(gateway.payloads)==3
+    assert [payload['plan_segment']['index'] for payload in gateway.payloads]==[1,2,3]
 
 
 def test_planning_context_rejects_unbounded_required_claims(content,monkeypatch):

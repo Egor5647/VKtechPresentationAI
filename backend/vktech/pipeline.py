@@ -9,7 +9,7 @@ from .contracts import ContentIR,DesignIR,GenerateRequest,SceneIR,AuditReport,Re
 from .store import Store
 from .settings import artifact_path,ROOT,config
 from .model import ModelGateway
-from .planning import plan_with_model,build_scenes,regenerate_slide_with_model,enrich_plan
+from .planning import plan_with_model,build_scenes,regenerate_slide_with_model,enrich_plan,validate_plan
 from .export import export_pptx,render,export_html
 from .audit import audit_scene,contextual_audit,project_contextual_issues,repair_scene
 from .selection import score_candidate,choose_variants,compose_scene
@@ -90,6 +90,7 @@ class Pipeline:
             plan.slides[index]=revised;plan=enrich_plan(plan,content)
             write_json(folder/'plan.json',plan.model_dump());scenes=build_scenes(design,content,plan,job.id)
         elif recompose:
+            validate_plan(plan,content,original.slide_count)
             plan=enrich_plan(plan,content);write_json(folder/'plan.json',plan.model_dump());scenes=build_scenes(design,content,plan,job.id)
         else:
             before=time.monotonic();plan=plan_with_model(self.gateway,content,original);timings['planning']=time.monotonic()-before

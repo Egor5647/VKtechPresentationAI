@@ -97,7 +97,7 @@ def validate_plan(plan: PresentationPlan, content: ContentIR, count: int):
     if len(plan.slides)!=count: raise ValueError('Model did not preserve requested slide count')
     if len({s.id for s in plan.slides})!=count: raise ValueError('Duplicate slide IDs')
     claims={c.id for c in content.claims}; datasets={d.id for d in content.datasets}; assets={a.id for a in content.assets}
-    used=set();fingerprints=set();claim_sets={}
+    used=set();fingerprints=set();titles=set();messages=set()
     source_numbers=set(re.findall(r'\d+(?:[.,]\d+)?', ' '.join(c.text for c in content.claims)+ ' '.join(str(x) for d in content.datasets for v in d.series.values() for x in v)))
     for slide in plan.slides:
         if not set(slide.claim_ids)<=claims: raise ValueError('Unknown claim reference')
@@ -105,19 +105,39 @@ def validate_plan(plan: PresentationPlan, content: ContentIR, count: int):
         if slide.asset_id and slide.asset_id not in assets: raise ValueError('Unknown asset reference')
         if slide.visual in {'chart','table'} and not slide.dataset_id: raise ValueError('Numeric visuals require a source dataset')
         if slide.visual=='image' and not slide.asset_id: raise ValueError('Image visual requires an asset')
-        fingerprint=(re.sub(r'\W+',' ',slide.title.casefold()).strip(),re.sub(r'\W+',' ',slide.message.casefold()).strip())
+        normalized_title=re.sub(r'\W+',' ',slide.title.casefold()).strip()
+        normalized_message=re.sub(r'\W+',' ',slide.message.casefold()).strip()
+        if normalized_title in titles:raise ValueError('Plan contains duplicate slide title: '+slide.title)
+        if normalized_message in messages:raise ValueError('Plan contains duplicate main idea: '+slide.title)
+        titles.add(normalized_title);messages.add(normalized_message)
+        fingerprint=(normalized_title,normalized_message)
         if fingerprint in fingerprints:raise ValueError('Plan contains duplicate slides: '+slide.title)
         fingerprints.add(fingerprint)
-        claim_signature=tuple(sorted(slide.claim_ids))
-        if claim_signature:
-            claim_sets[claim_signature]=claim_sets.get(claim_signature,0)+1
-            if claim_sets[claim_signature]>2:raise ValueError('Plan repeats the same source set on more than two slides')
         visible=' '.join([slide.title,slide.message,slide.takeaway,*slide.support_points])
         invented=set(re.findall(r'\d+(?:[.,]\d+)?',visible))-source_numbers
         if invented: raise ValueError('Plan introduces numbers absent from source: '+', '.join(sorted(invented)))
         used.update(slide.claim_ids)
     required={c.id for c in content.claims if c.required}
     if not required<=used: raise ValueError('Plan omits mandatory claims: '+', '.join(sorted(required-used)))
+
+
+def disambiguate_titles(plan: PresentationPlan, existing_titles=()) -> PresentationPlan:
+    """Replace repeated labels with a unique source-backed statement.
+
+    A title can collide even when the slide messages are different. In that case
+    the message itself is the safest label because it has already been checked
+    against source numbers and claim references.
+    """
+    result=plan.model_copy(deep=True)
+    used={re.sub(r'\W+',' ',value.casefold()).strip() for value in existing_titles}
+    for slide in result.slides:
+        normalized=re.sub(r'\W+',' ',slide.title.casefold()).strip()
+        if normalized in used:
+            candidates=[re.split(r'(?<=[.!?])\s+',slide.message)[0],slide.takeaway,*slide.support_points]
+            replacement=next((_short(value,96) for value in candidates if value.strip() and re.sub(r'\W+',' ',_short(value,96).casefold()).strip() not in used),None)
+            if replacement:slide.title=replacement;normalized=re.sub(r'\W+',' ',replacement.casefold()).strip()
+        used.add(normalized)
+    return result
 
 
 def plan_with_model(gateway,content,request):
@@ -138,7 +158,11 @@ def plan_with_model(gateway,content,request):
     catalog_limit=max(limit,max(0,int(os.environ.get('MODEL_MAX_PLANNING_ASSETS','8'))))
     catalog=sorted(candidates,key=lambda item:(not item[2],-item[1],item[3].id))[:catalog_limit]
     planning_content=content.model_copy(deep=True)
-    planning_content.claims=planning_claims(content,request.brief)
+    selected_claims=planning_claims(content,request.brief)
+    selected_ids={claim.id for claim in selected_claims}
+    # Source order gives the planner a stable narrative spine. Ranking is used
+    # only to choose what fits in the bounded context.
+    planning_content.claims=[claim for claim in content.claims if claim.id in selected_ids]
     planning_assets={item[3].id:item[3] for item in catalog+selected}
     planning_content.assets=list(planning_assets.values())
     required=[c.id for c in content.claims if c.required]
@@ -155,21 +179,76 @@ def plan_with_model(gateway,content,request):
                 sheet.paste(thumb,(x+(width-thumb.width)//2,y+25));draw.text((x+5,y+5),item[3].id,fill='black')
             contact=Path(temp)/'source-assets.png';sheet.save(contact,'PNG',optimize=True);model_images=[contact]
             payload['visual_input']='One contact sheet. Labels are exact asset_id values from source_image_order.'
-        error=None
-        for attempt in range(2):
-            plan=normalize_plan(gateway.structured('planning',payload,PresentationPlan,images=model_images))
-            try:
-                validate_plan(plan,content,request.slide_count)
-                return enrich_plan(plan,content)
-            except NeedsInput:
-                raise
-            except ValueError as exc:
-                error=exc
-                log.warning('Planning validation attempt %s failed: %s',attempt+1,exc)
-                if attempt==0:
-                    payload['validation_feedback']=str(exc)
-                    payload['correction']='Return a complete corrected plan. Every required_claim_id must occur in at least one slide.claim_ids.'
-        raise error
+        def request_plan(batch_payload,batch_content,batch_count,existing_titles=(),existing_messages=(),assignments=()):
+            error=None
+            for attempt in range(3):
+                plan=normalize_plan(gateway.structured('planning',batch_payload,PresentationPlan,images=model_images))
+                plan=disambiguate_titles(plan,existing_titles)
+                try:
+                    validate_plan(plan,batch_content,batch_count)
+                    if assignments:
+                        for slide,assignment in zip(plan.slides,assignments):
+                            if set(slide.claim_ids)!=set(assignment['claim_ids']):
+                                raise ValueError(f"Slide position {assignment['position']} must use exactly these claim_ids: {', '.join(assignment['claim_ids'])}")
+                    forbidden_titles={re.sub(r'\W+',' ',value.casefold()).strip() for value in existing_titles}
+                    forbidden_messages={re.sub(r'\W+',' ',value.casefold()).strip() for value in existing_messages}
+                    conflict=next((slide.title for slide in plan.slides if re.sub(r'\W+',' ',slide.title.casefold()).strip() in forbidden_titles),None)
+                    if conflict:raise ValueError('Plan repeats a title from an earlier segment: '+conflict)
+                    conflict=next((slide.title for slide in plan.slides if re.sub(r'\W+',' ',slide.message.casefold()).strip() in forbidden_messages),None)
+                    if conflict:raise ValueError('Plan repeats a main idea from an earlier segment: '+conflict)
+                    return plan
+                except NeedsInput:
+                    raise
+                except ValueError as exc:
+                    error=exc
+                    log.warning('Planning validation attempt %s failed: %s',attempt+1,exc)
+                    if attempt<2:
+                        batch_payload['validation_feedback']=str(exc)
+                        batch_payload['correction_attempt']=attempt+2
+                        batch_payload['previous_slide_outline']=[
+                            {'position':index+1,'title':slide.title,'message':slide.message,'claim_ids':slide.claim_ids}
+                            for index,slide in enumerate(plan.slides)
+                        ]
+                        batch_payload['correction']='Return a complete corrected plan. Inspect previous_slide_outline and replace every repeated title or main idea with a distinct source-backed teaching step. Do not return the same outline again. Every required_claim_id must occur in at least one slide.claim_ids.'
+            raise error
+
+        # Small local models tend to repeat a short tail when constrained to one
+        # very large JSON object. Plan long decks in coherent source-ordered
+        # segments, then validate the combined story as one presentation.
+        if request.slide_count>12:
+            batch_total=(request.slide_count+5)//6
+            base=request.slide_count//batch_total;extra=request.slide_count%batch_total
+            counts=[base+(index<extra) for index in range(batch_total)]
+            claims=planning_content.claims;combined=[];existing_titles=[];existing_messages=[]
+            claim_groups=[]
+            if len(claims)>=request.slide_count:
+                for position in range(request.slide_count):
+                    start=len(claims)*position//request.slide_count;end=len(claims)*(position+1)//request.slide_count
+                    claim_groups.append(claims[start:end])
+            for index,batch_count in enumerate(counts):
+                first=len(combined);last=first+batch_count
+                if claim_groups:
+                    groups=claim_groups[first:last];batch_claims=[claim for group in groups for claim in group]
+                    assignments=[{'position':first+local+1,'claim_ids':[claim.id for claim in group]} for local,group in enumerate(groups)]
+                else:
+                    start=len(claims)*index//batch_total;end=len(claims)*(index+1)//batch_total
+                    batch_claims=claims[start:end];assignments=[]
+                batch_content=planning_content.model_copy(deep=True);batch_content.claims=batch_claims
+                batch_required=[claim.id for claim in batch_content.claims if claim.required]
+                batch_payload={**payload,'content':batch_content.model_dump(),'slide_count':batch_count,'required_claim_ids':batch_required,
+                    'plan_segment':{'index':index+1,'total':batch_total,'first_position':first+1,'last_position':last,'existing_titles':existing_titles},
+                    'slide_assignments':assignments}
+                batch=request_plan(batch_payload,batch_content,batch_count,existing_titles,existing_messages,assignments)
+                for slide in batch.slides:
+                    slide.id=f'slide-{len(combined)+1}';combined.append(slide)
+                existing_titles.extend(slide.title for slide in batch.slides)
+                existing_messages.extend(slide.message for slide in batch.slides)
+            plan=normalize_plan(PresentationPlan(slides=combined))
+            validate_plan(plan,content,request.slide_count)
+            return enrich_plan(plan,content)
+
+        plan=request_plan(payload,content,request.slide_count)
+        return enrich_plan(plan,content)
 
 
 def regenerate_slide_with_model(gateway,slide,content,instruction):
