@@ -1,6 +1,7 @@
 from __future__ import annotations
 import hashlib
 import json
+import os
 import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -23,10 +24,18 @@ def workflow_manifest():
 
 def illustration_prompt(slide):
     text=(slide.title+' '+slide.message).lower()
-    if 'scheduler' in text or 'планиров' in text:return 'Multiple abstract computing nodes taking ready tasks from a shared queue, clear flow from queue to processors, blue and cyan geometric editorial illustration on white background'
-    if 'dag' in text or 'граф' in text:return 'A clean directed acyclic graph of glowing blue task nodes and dependency arrows, educational editorial illustration on white background'
-    if 'pram' in text:return 'Many identical processor nodes connected to one shared memory block, clean blue geometric educational illustration on white background'
-    return 'Abstract parallel computing system with connected processors and flowing tasks, clean blue geometric educational illustration on white background'
+    suffix='Isometric editorial illustration, VK Education palette with vivid blue, cyan and magenta accents, soft depth, clean pale background, wide 16:9 composition, no words, no letters, no numbers, no logo'
+    if 'вывод' in text or 'итог' in text:return 'A coherent overview of parallel computing: processors, shared memory, task graph and critical path assembled into one balanced system. '+suffix
+    if 'scheduler' in text or 'планиров' in text:return 'Several computing nodes take ready tasks from a shared queue, clear visual flow from queue to processors. '+suffix
+    if 'dag' in text or 'граф' in text:return 'A directed acyclic graph made of luminous task nodes and dependency arrows, one critical path is emphasized. '+suffix
+    if 'pram' in text or 'общ' in text and 'памят' in text:return 'Many identical processor modules connected to one shared memory block, visually clear concurrent access. '+suffix
+    if 'reduc' in text or 'редук' in text:return 'A balanced reduction tree combines many small input blocks into one result, clear bottom-up flow. '+suffix
+    if 'work' in text or 'span' in text or 'работ' in text and 'глубин' in text:return 'Parallel task branches with total work shown by many nodes and critical span shown by one highlighted path. '+suffix
+    if 'fork' in text or 'join' in text:return 'One task splits into several parallel branches and then joins into one result, clear fork and join structure. '+suffix
+    if 'конфликт' in text or 'запис' in text:return 'Several processors simultaneously address shared memory cells, one access conflict is highlighted with a magenta glow. '+suffix
+    if 'цикл' in text or 'parallel for' in text:return 'A long sequence of loop iterations is distributed evenly across several processor lanes. '+suffix
+    if 'нижн' in text or 'границ' in text:return 'A computational path approaches a firm lower boundary visualized as a glowing geometric plane. '+suffix
+    return 'Abstract parallel computing system with connected processors and flowing task blocks. '+suffix
 
 
 class Pipeline:
@@ -59,15 +68,25 @@ class Pipeline:
             if original.generate_images:
                 from .contracts import Asset
                 from .runtime import local_image_phase
-                candidates=[ps for ps in plan.slides if ps.visual=='none' and ps.role=='content']
-                candidates.sort(key=lambda ps:(0 if any(word in (ps.title+' '+ps.message).lower() for word in ('модель','архитект','паралл','процесс','система')) else 1,ps.id))
+                candidates=[ps for i,ps in enumerate(plan.slides) if ps.visual=='none' and ps.role=='content' and i<len(plan.slides)-1 and not any(word in (ps.title+' '+ps.message).lower() for word in ('вопрос','домашн','спасибо','итог'))]
+                priority=('reduc','редук','dag','граф','планиров','scheduler','pram','памят','work','span','fork','join','parallel for','цикл','конфликт','границ')
+                candidates.sort(key=lambda ps:(0 if any(word in (ps.title+' '+ps.message).lower() for word in priority) else 1,ps.id))
+                image_count=max(0,min(8,int(os.environ.get('T2I_IMAGE_COUNT','4'))))
+                image_started=time.monotonic();generated_count=0
+                generated_hashes=set()
                 with local_image_phase():
-                    for ps in candidates[:1]:
-                        output=folder/(ps.id+'-generated.png');self.gateway.image(illustration_prompt(ps),output)
+                    for ps in candidates[:image_count]:
+                        output=folder/(ps.id+'-generated.png');prompt=illustration_prompt(ps)
+                        for attempt in range(2):
+                            self.gateway.image(prompt+(' Alternative bird-eye composition with a distinct silhouette.' if attempt else ''),output)
+                            digest=hashlib.sha256(output.read_bytes()).hexdigest()
+                            if digest not in generated_hashes:break
+                        generated_hashes.add(digest)
                         from PIL import Image
                         with Image.open(output) as generated: media={'PNG':'image/png','JPEG':'image/jpeg','WEBP':'image/webp'}[generated.format]
                         asset=Asset(id=ps.id+'-generated',path=str(output.relative_to(artifact_path('.'))),description=ps.message,source='Z-Image-Turbo 8-bit MLX generated; illustrative, not factual evidence',media_type=media,claim_ids=ps.claim_ids)
-                        content.assets.append(asset);ps.asset_id=asset.id;ps.visual='image'
+                        content.assets.append(asset);ps.asset_id=asset.id;ps.visual='image';generated_count+=1
+                timings['image_generation']=round(time.monotonic()-image_started,3);timings['generated_image_count']=generated_count
             write_json(folder/'plan.json',plan.model_dump());scenes=build_scenes(design,content,plan,job.id)
         write_json(folder/'content.json',content.model_dump());write_json(folder/'design.json',design.model_dump())
         stage('layout_export_render')

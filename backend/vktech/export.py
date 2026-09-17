@@ -15,11 +15,71 @@ from pptx.util import Pt
 from pptx.dml.color import RGBColor
 from pptx.chart.data import CategoryChartData
 from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
-from pptx.enum.text import PP_ALIGN
+from pptx.enum.shapes import MSO_SHAPE, MSO_CONNECTOR
+from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from .contracts import SceneIR, DesignIR
 from .opc import Package, NS, serialize, relpath
 from .smartart import inject
 from .settings import artifact_path
+
+
+def _card(out,node,x,y,w,h,text,name,fill,foreground,bold=False):
+    sh=out.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,x,y,w,h)
+    sh.name=name;sh.fill.solid();sh.fill.fore_color.rgb=RGBColor.from_string(fill)
+    sh.line.color.rgb=RGBColor.from_string(node.data.get('accent','0077FF'));sh.line.width=Pt(1.4)
+    tf=sh.text_frame;tf.clear();tf.word_wrap=True;tf.vertical_anchor=MSO_ANCHOR.MIDDLE
+    tf.margin_left=tf.margin_right=Pt(9);tf.margin_top=tf.margin_bottom=Pt(6)
+    p=tf.paragraphs[0];p.text=text;p.alignment=PP_ALIGN.CENTER
+    p.font.name=node.style.font;p.font.size=Pt(node.style.size);p.font.bold=bold;p.font.color.rgb=RGBColor.from_string(foreground)
+    return sh
+
+
+def _diagram(out,node,xywh):
+    from .audit import contrast
+    x,y,w,h=xywh;items=node.data.get('items',[])[:4];layout=node.data.get('layout','list')
+    if not items:return
+    accent=node.data.get('accent','0077FF');surface=node.data.get('surface') or node.style.fill or 'E8EEF6'
+    dark='202020' if contrast('202020',surface)>=4.5 else 'FFFFFF'
+    white='FFFFFF' if contrast('FFFFFF',accent)>=3 else '202020'
+    gap=max(round(w*.025),Pt(8));vgap=max(round(h*.07),Pt(8))
+    def connector(x1,y1,x2,y2,index):
+        line=out.shapes.add_connector(MSO_CONNECTOR.STRAIGHT,x1,y1,x2,y2)
+        line.name=f'{node.id}-connector-{index}';line.line.color.rgb=RGBColor.from_string(accent);line.line.width=Pt(2)
+    if layout=='sequence':
+        count=len(items)
+        if count>=4 or max(map(len,items),default=0)>52:
+            cols=2;rows=(count+1)//2;cw=(w-gap)//2;ch=(h-vgap*(rows-1))//rows
+            positions=[]
+            for i,item in enumerate(items):
+                row=i//2;col=i%2 if row%2==0 else 1-i%2
+                positions.append((x+col*(cw+gap),y+row*(ch+vgap)))
+            for i,((cx,cy),(nx,ny)) in enumerate(zip(positions,positions[1:]),1):
+                connector(cx+cw//2,cy+ch//2,nx+cw//2,ny+ch//2,i)
+            for i,(item,(cx,cy)) in enumerate(zip(items,positions)):
+                _card(out,node,cx,cy,cw,ch,item,f'{node.id}-card-{i+1}',accent if i==0 else surface,white if i==0 else dark,i==0)
+        else:
+            cw=(w-gap*(count-1))//count;ch=min(round(h*.62),h);cy=y+(h-ch)//2
+            for i,item in enumerate(items):
+                cx=x+i*(cw+gap)
+                if i:connector(cx-gap,cy+ch//2,cx,cy+ch//2,i)
+                _card(out,node,cx,cy,cw,ch,item,f'{node.id}-card-{i+1}',accent if i==0 else surface,white if i==0 else dark,i==0)
+    elif layout=='hierarchy':
+        root_h=round(h*.30);root_w=round(w*.48);root_x=x+(w-root_w)//2
+        child_count=max(1,len(items)-1);child_y=y+round(h*.57);child_h=h-(child_y-y)
+        child_w=(w-gap*(child_count-1))//child_count
+        for i in range(child_count):
+            cx=x+i*(child_w+gap)
+            connector(root_x+root_w//2,y+root_h,cx+child_w//2,child_y,i+1)
+        _card(out,node,root_x,y,root_w,root_h,items[0],f'{node.id}-card-1',accent,white,True)
+        for i,item in enumerate(items[1:] or items[:1]):
+            cx=x+i*(child_w+gap)
+            _card(out,node,cx,child_y,child_w,child_h,item,f'{node.id}-card-{i+2}',surface,dark)
+    else:
+        cols=2 if len(items)>1 else 1;rows=(len(items)+cols-1)//cols
+        cw=(w-gap*(cols-1))//cols;ch=(h-vgap*(rows-1))//rows
+        for i,item in enumerate(items):
+            col=i%cols;row=i//cols
+            _card(out,node,x+col*(cw+gap),y+row*(ch+vgap),cw,ch,item,f'{node.id}-card-{i+1}',accent if i==0 else surface,white if i==0 else dark,i==0)
 
 
 def temporary_objects(scene,slide):
@@ -67,11 +127,25 @@ def temporary_objects(scene,slide):
                         p.font.name=node.style.font;p.font.size=Pt(max(8,min(node.style.size,14)));p.font.color.rgb=RGBColor.from_string(node.style.color)
         elif node.kind=='image':
             source=artifact_path(node.data['path'])
-            from PIL import Image
-            with Image.open(source) as im:iw,ih=im.size
+            from PIL import Image,ImageChops
+            picture=str(source)
+            with Image.open(source) as opened:
+                im=opened.convert('RGB')
+                if str(node.data.get('source','')).startswith('Z-Image'):
+                    background=Image.new('RGB',im.size,im.getpixel((0,0)))
+                    diff=ImageChops.difference(im,background).convert('L').point(lambda value:255 if value>18 else 0)
+                    bbox=diff.getbbox()
+                    if bbox:
+                        pad=max(12,round(min(im.size)*.04));l,t,r,bt=bbox
+                        im=im.crop((max(0,l-pad),max(0,t-pad),min(im.width,r+pad),min(im.height,bt+pad)))
+                    stream=io.BytesIO();im.save(stream,format='PNG');stream.seek(0);picture=stream
+                iw,ih=im.size
             factor=min(xywh[2]/iw,xywh[3]/ih)
             w,h=round(iw*factor),round(ih*factor)
-            sh=out.shapes.add_picture(str(source),xywh[0]+(xywh[2]-w)//2,xywh[1]+(xywh[3]-h)//2,w,h)
+            sh=out.shapes.add_picture(picture,xywh[0]+(xywh[2]-w)//2,xywh[1]+(xywh[3]-h)//2,w,h)
+        elif node.kind=='diagram':
+            _diagram(out,node,xywh)
+            continue
         else:continue
         sh.name=node.id
     buf=io.BytesIO();prs.save(buf);return Package(buf.getvalue())
@@ -109,7 +183,7 @@ def export_pptx(template: bytes,design: DesignIR,scene: SceneIR,path: Path,decor
             objroot=objects.root(temp_part)
             rr=pkg.root(relpath(dest));nextid=max([int(n.get('id','0')) for n in tree.findall('.//p:cNvPr',NS)]+[1])+1
             for shape in objroot.find('p:cSld/p:spTree',NS):
-                if shape.tag.split('}')[-1] not in {'sp','pic','graphicFrame'}:continue
+                if shape.tag.split('}')[-1] not in {'sp','cxnSp','pic','graphicFrame'}:continue
                 shape=copy.deepcopy(shape)
                 for nv in shape.findall('.//p:cNvPr',NS):nv.set('id',str(nextid));nextid+=1
                 for el in shape.iter():
@@ -186,7 +260,7 @@ def export_html(scene,path,backgrounds=None):
                 data=n.data;headers=[data['title']]+[name+' ('+data['unit']+')' for name in data['series']]
                 rows=[headers]+[[cat]+[str(v[j]) for v in data['series'].values()] for j,cat in enumerate(data['categories'])]
                 body='<table>'+''.join('<tr>'+''.join(f'<{"th" if ri==0 else "td"}>{html.escape(cell)}</{"th" if ri==0 else "td"}>' for cell in row)+'</tr>' for ri,row in enumerate(rows))+'</table>'
-            elif n.kind=='smartart':body='<ol class="diagram '+n.data.get('layout','list')+'">'+''.join('<li>'+html.escape(t)+'</li>' for t in n.data.get('items',[]))+'</ol>'
+            elif n.kind in {'diagram','smartart'}:body='<ol class="diagram '+n.data.get('layout','list')+'">'+''.join('<li>'+html.escape(t)+'</li>' for t in n.data.get('items',[]))+'</ol>'
             elif n.kind=='image':body='<img alt="'+html.escape(n.data['description'],quote=True)+'" src="data:'+n.data.get('media_type','image/png')+';base64,'+base64.b64encode(artifact_path(n.data['path']).read_bytes()).decode()+'">'
             else:body=''
             nodes.append(f'<div class="node {n.kind}" data-element-id="{html.escape(n.id,quote=True)}" style="{style}">{body}</div>')

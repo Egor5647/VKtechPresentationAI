@@ -108,7 +108,7 @@ class ContentIR(Contract):
 class PlanSlide(Contract):
     id: str
     title: str = Field(min_length=1, max_length=100)
-    message: str = Field(min_length=1, max_length=240)
+    message: str = Field(min_length=1, max_length=360)
     claim_ids: list[str]
     dataset_id: str | None = None
     asset_id: str | None = None
@@ -124,7 +124,7 @@ class PresentationPlan(Contract):
 
 class Node(Contract):
     id: str
-    kind: Literal["text", "chart", "table", "smartart", "image"]
+    kind: Literal["text", "chart", "table", "diagram", "smartart", "image"]
     role: str
     box: Box
     style: Style

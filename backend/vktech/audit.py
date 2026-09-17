@@ -94,7 +94,8 @@ def audit_scene(scene,design,content,opened=False):
                 if n.style.size not in design.font_sizes:add('D09',[n])
                 if n.style.color not in design.palette:add('D10',[n])
                 if n.text.strip():
-                    ratio=contrast(n.style.color,n.style.fill or slide.background);threshold=3 if n.role=='title' and n.style.size>=18 else 4.5
+                    ratio=contrast(n.style.color,n.style.fill or slide.background)
+                    threshold=3 if n.style.size>=24 or (n.style.size>=18 and n.style.bold) else 4.5
                     if ratio<threshold:add('D13',[n],evidence={'ratio':round(ratio,2),'threshold':threshold,'background_method':'solid color; decoration requires visual check'})
                 if PLACEHOLDER.search(n.text):add('D20',[n],repair='remove_placeholder')
                 minimum=28 if n.role=='title' else 18
@@ -169,7 +170,7 @@ def contextual_audit(gateway,scene,content,images):
         nodes=[]
         for node in slide.nodes:
             item={'id':node.id,'kind':node.kind,'role':node.role,'text':node.text,'claim_ids':node.claim_ids}
-            if node.kind in {'chart','table','smartart'}:item['data']=node.data
+            if node.kind in {'chart','table','diagram','smartart'}:item['data']=node.data
             elif node.kind=='image':item['data']={'description':node.data.get('description',''),'source':node.data.get('source','')}
             nodes.append(item)
         compact_scene['slides'].append({'id':slide.id,'title':slide.title,'role':slide.role,'nodes':nodes})
