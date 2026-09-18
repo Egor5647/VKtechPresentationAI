@@ -11,7 +11,7 @@ from .settings import artifact_path,ROOT,config
 from .model import ModelGateway
 from .planning import plan_with_model,build_scenes,regenerate_slide_with_model,enrich_plan,validate_plan,assign_visual_strategies,protect_text_from_template_decor
 from .export import export_pptx,render,export_html
-from .audit import audit_scene,contextual_audit,project_contextual_issues,repair_scene
+from .audit import audit_scene,audit_rendered_deck,contextual_audit,project_contextual_issues,repair_scene
 from .selection import score_candidate,choose_variants,compose_scene
 from .palette import palette_from_design,recolor_design,recolor_generated_assets,recolor_scene,recolor_template,replace_scene_asset_paths
 
@@ -149,7 +149,8 @@ class Pipeline:
                     material=material_by_variant[variant];candidate=material[0].slides[index]
                     value,detail=score_candidate(material[0],candidate,material[5][index])
                     scores[slide.id][variant]=value;reasons[slide.id][variant]=detail
-            selection=choose_variants(scores,[s.id for s in scenes[0].slides])
+            preview_map={variant:material_by_variant[variant][5] for variant in ('A','B','C')}
+            selection=choose_variants(scores,[s.id for s in scenes[0].slides],scenes,preview_map)
             if regenerate and parentresult.get('selection'):
                 base_selection=regenerate.selection or parentresult['selection']
                 selection={**base_selection,regenerate.slide_id:selection[regenerate.slide_id]}
@@ -190,6 +191,7 @@ class Pipeline:
         pdf,previews=render(pptx,out/'render');_,backgrounds=render(decor,out/'background')
         html=out/'presentation.html';export_html(scene,html,backgrounds)
         report=audit_scene(scene,design,content,opened=True)
+        report.issues.extend(audit_rendered_deck(scene,previews))
         return scene,out,pptx,pdf,html,previews,report,time.monotonic()-start
 
     def _entry(self,scene,out,pptx,pdf,html,previews,report):

@@ -1,9 +1,13 @@
 from __future__ import annotations
 import re
 from pathlib import Path
-from PIL import Image,ImageStat
+from PIL import Image,ImageFilter,ImageStat
 from .contracts import SceneIR
 from .audit import union_area
+
+
+def _pixels(image):
+    return image.get_flattened_data() if hasattr(image,'get_flattened_data') else image.getdata()
 
 
 def score_candidate(scene,slide,preview:Path|None=None):
@@ -40,24 +44,67 @@ def score_candidate(scene,slide,preview:Path|None=None):
     if preview and preview.exists():
         with Image.open(preview) as source:
             im=source.convert('L');im.thumbnail((320,180));variation=ImageStat.Stat(im).stddev[0]
+            edges=im.filter(ImageFilter.FIND_EDGES).crop((3,3,max(4,im.width-3),max(4,im.height-3)))
+            edge_coverage=sum(value>=24 for value in _pixels(edges))/max(1,edges.width*edges.height)
         if variation<8:score-=10
-        reasons['render_variation']=round(variation,2)
+        if slide.role=='content' and edge_coverage<.035:score-=12
+        reasons['render_variation']=round(variation,2);reasons['render_coverage']=round(edge_coverage,3)
     return round(max(0,min(100,score)),2),reasons
 
 
-def choose_variants(scores:dict[str,dict[str,float]],slide_ids:list[str]):
-    """Choose the strongest sequence while avoiding monotonous repetition."""
-    selected={};history=[]
-    for slide_id in slide_ids:
-        ranked=[]
-        for variant,value in scores[slide_id].items():
-            adjusted=value
-            if history and history[-1]==variant:adjusted-=3
-            if len(history)>=2 and history[-2:]==[variant,variant]:adjusted-=15
-            ranked.append((adjusted,value,variant))
-        _,_,winner=max(ranked)
-        selected[slide_id]=winner;history.append(winner)
-    return selected
+def layout_signature(slide):
+    """Describe visible geometry without depending on generated text."""
+    nodes=[]
+    for node in slide.nodes:
+        if node.role=='accent':continue
+        box=tuple(round(value*12) for value in (node.box.x,node.box.y,node.box.w,node.box.h))
+        nodes.append((node.kind,node.role,box))
+    background='dark' if slide.background.upper() not in {'FFFFFF','FEFEFE','F4F7F4','F7F9FB'} else 'light'
+    return slide.role,background,tuple(nodes)
+
+
+def preview_similarity(left:Path|None,right:Path|None) -> float:
+    """Compare the edge structure of two renders; colour changes do not hide repeats."""
+    if not left or not right or not left.exists() or not right.exists():return 0
+    values=[]
+    for path in (left,right):
+        with Image.open(path) as source:
+            image=source.convert('L').resize((64,36),Image.Resampling.LANCZOS).filter(ImageFilter.FIND_EDGES)
+            values.append(list(_pixels(image)))
+    distance=sum(abs(a-b) for a,b in zip(*values))/(255*len(values[0]))
+    return max(0,1-distance)
+
+
+def choose_variants(scores:dict[str,dict[str,float]],slide_ids:list[str],scenes:list[SceneIR]|None=None,previews:dict[str,list[Path]]|None=None):
+    """Choose the best whole-deck sequence with explicit diversity penalties."""
+    variants=tuple(sorted(next(iter(scores.values())))) if scores else ()
+    scene_map={scene.variant:scene for scene in scenes or []}
+    # Dynamic programming keeps the previous two choices. That is enough to
+    # penalize adjacent visual repeats and three identical density modes.
+    states={(None,None):(0.0,[])}
+    for index,slide_id in enumerate(slide_ids):
+        next_states={}
+        for (previous2,previous),(total,history) in states.items():
+            for variant in variants:
+                adjusted=scores[slide_id][variant]
+                if previous==variant:adjusted-=3
+                if previous2==previous==variant:adjusted-=15
+                if previous and scene_map:
+                    current_slide=scene_map[variant].slides[index]
+                    previous_slide=scene_map[previous].slides[index-1]
+                    current_sig=layout_signature(current_slide);previous_sig=layout_signature(previous_slide)
+                    if current_sig==previous_sig:adjusted-=16
+                    elif current_sig[1:]==previous_sig[1:]:adjusted-=9
+                    elif current_slide.prototype_id==previous_slide.prototype_id:adjusted-=4
+                    if previews:
+                        similarity=preview_similarity(Path(previews[previous][index-1]),Path(previews[variant][index]))
+                        if similarity>=.985:adjusted-=18
+                        elif similarity>=.965:adjusted-=9
+                key=(previous,variant);candidate=(total+adjusted,history+[variant])
+                if key not in next_states or candidate[0]>next_states[key][0]:next_states[key]=candidate
+        states=next_states
+    history=max(states.values(),key=lambda item:item[0])[1] if states else []
+    return dict(zip(slide_ids,history))
 
 
 def compose_scene(scenes:list[SceneIR],selection:dict[str,str],scene_id:str):

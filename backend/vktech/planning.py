@@ -93,7 +93,10 @@ def _semantic_tokens(value: str) -> set[str]:
 
 def _near_duplicate(left: str,right: str) -> bool:
     a=_semantic_tokens(left);b=_semantic_tokens(right);shared=a&b
-    return len(shared)>=6 and len(shared)/max(1,min(len(a),len(b)))>=.62
+    # Shared domain vocabulary is common in one deck (for example EREW/CREW
+    # appear in both broadcast and Set(A, x)). Only reject ideas whose smaller
+    # semantic vocabulary is almost completely contained in the other.
+    return len(shared)>=6 and len(shared)/max(1,min(len(a),len(b)))>=.82
 
 
 def _complete_sentence(value: str) -> bool:
@@ -112,6 +115,19 @@ def _looks_finished(value: str) -> bool:
     if last==last.casefold() and last.casefold() in {'и','а','но','или','что','как','если','для','при','над','под','без','из','от','по','на','в','к','с'}:return False
     if re.fullmatch(r'[а-яё]{1,3}',last) and last==last.casefold():return False
     return True
+
+
+def _finish_if_safe(value: str) -> str:
+    """Add missing terminal punctuation only when the clause already has a safe end."""
+    value=_clean_text(value).rstrip()
+    if not value:return ''
+    if _looks_finished(value):return value
+    if re.search(r'[.!?)]$',value):return ''
+    words=re.findall(r'[A-Za-zА-Яа-яЁё]+',value)
+    if not words:return value+'.'
+    last=words[-1].casefold()
+    if last in {'и','а','но','или','что','как','если','для','при','над','под','без','из','от','по','на','в','к','с'}:return ''
+    return value+'.'
 
 
 def _sentence(value: str) -> str:
@@ -160,16 +176,23 @@ def fit_semantic_variants(plan: PresentationPlan) -> PresentationPlan:
     """Fit authored whole thoughts by composing complete model-written units."""
     result=plan.model_copy(deep=True)
     for slide in result.slides:
-        # Old stored plans may not yet contain authored density variants. They
-        # retain the compatibility path in enrich_plan.
-        if not slide.takeaway or not slide.balanced_message:continue
-        supports=[_dedupe_sentences(_clean_text(value)) for value in slide.support_points if _looks_finished(value) and len(value)<=110]
+        # Imported legacy plans did not author density-specific copies. Keep
+        # that compatibility path; enrich_plan will derive display metadata.
+        if not slide.takeaway and not slide.balanced_message:
+            slide.support_points=[finished for value in slide.support_points if (finished:=_finish_if_safe(value)) and len(finished)<=110][:3]
+            continue
+        supports=[]
+        for value in slide.support_points:
+            finished=_finish_if_safe(value)
+            if finished and len(finished)<=110:supports.append(_dedupe_sentences(finished))
         slide.support_points=supports[:3]
         title_sentence=_sentence(slide.title)
-        concise=_dedupe_sentences(slide.takeaway) if len(slide.takeaway)<=130 and _looks_finished(slide.takeaway) else ''
+        finished_takeaway=_finish_if_safe(slide.takeaway)
+        concise=_dedupe_sentences(finished_takeaway) if len(finished_takeaway)<=130 and _looks_finished(finished_takeaway) else ''
         if not concise:
-            concise=next((value for value in [*supports,slide.balanced_message,slide.message,title_sentence] if len(value)<=130 and _looks_finished(value)),title_sentence)
-        authored_balanced=_dedupe_sentences(slide.balanced_message)
+            fallbacks=[*supports,_finish_if_safe(slide.balanced_message),_finish_if_safe(slide.message),title_sentence]
+            concise=next((value for value in fallbacks if len(value)<=130 and _looks_finished(value)),title_sentence)
+        authored_balanced=_dedupe_sentences(_finish_if_safe(slide.balanced_message))
         balanced=authored_balanced if len(authored_balanced)<=180 and _looks_finished(authored_balanced) else ''
         balanced_tokens=_semantic_tokens(balanced);concise_tokens=_semantic_tokens(concise)
         shallow_balanced=balanced and _near_duplicate(balanced,concise) and len(balanced_tokens)<len(concise_tokens)*1.45
@@ -177,7 +200,7 @@ def fit_semantic_variants(plan: PresentationPlan) -> PresentationPlan:
             additions=[*_sentence_units(authored_balanced),*supports]
             target=min(180,max(75,len(concise)+8))
             balanced=_compose(concise,additions,180,[concise],target,False) or _compose(concise,[title_sentence],180,[concise],target,False) or title_sentence
-        authored_detailed=_dedupe_sentences(slide.message)
+        authored_detailed=_dedupe_sentences(_finish_if_safe(slide.message))
         detailed=authored_detailed if len(authored_detailed)<=220 and _looks_finished(authored_detailed) else ''
         detailed_tokens=_semantic_tokens(detailed)
         shallow_repeat=detailed and _near_duplicate(detailed,concise) and len(detailed_tokens)<len(concise_tokens)*1.45
@@ -187,6 +210,23 @@ def fit_semantic_variants(plan: PresentationPlan) -> PresentationPlan:
             detailed=_compose(concise,additions,220,[concise,balanced],target,True) or _compose(balanced,additions,220,[concise,balanced],target,True)
         if not detailed:
             detailed=_compose(concise,[title_sentence],220,[concise,balanced]) or balanced
+        if not (len(concise)<len(balanced)<len(detailed)):
+            # Local models occasionally author three sound versions in the
+            # wrong size order. Reuse whole authored thoughts and reorder them
+            # instead of cutting characters or requesting another generation.
+            candidates=[]
+            for value in (concise,balanced,detailed,finished_takeaway,authored_balanced,authored_detailed,title_sentence,*supports):
+                value=_dedupe_sentences(_finish_if_safe(value))
+                if value and value not in candidates:candidates.append(value)
+            triples=[]
+            for short in candidates:
+                if len(short)>130:continue
+                for medium in candidates:
+                    if not len(short)<len(medium)<=180:continue
+                    for long in candidates:
+                        if len(medium)<len(long)<=220:triples.append((len(long),len(medium),len(short),short,medium,long))
+            if triples:
+                *_,concise,balanced,detailed=max(triples)
         slide.takeaway=concise;slide.balanced_message=balanced;slide.message=detailed
     return result
 
@@ -260,6 +300,7 @@ def assign_visual_strategies(plan: PresentationPlan,content: ContentIR,allow_gen
     hierarchy_words=re.compile(r'\bdag\b|граф|зависим|иерарх|архитектур',re.I)
     sequence_words=re.compile(r'этап|алгоритм|процесс|fork.?join|редукц|scheduler|планиров|broadcast|parallel for|цикл',re.I)
     comparison_words=re.compile(r'сравн|различ|режим|\bversus\b|\bvs\b|erew.+crew|crew.+crcw',re.I)
+    conceptual_words=re.compile(r'от\s+конкурент\w*\s+код\w*\s+к\s+абстракт|практическ\w*\s+реализац|инженерн\w*\s+(?:контекст|систем)|пользовательск\w*\s+сценар',re.I)
     for index,slide in enumerate(result.slides):
         text=' '.join((slide.title,slide.message,slide.visual_brief)).lower()
         if slide.dataset_id:
@@ -272,13 +313,14 @@ def assign_visual_strategies(plan: PresentationPlan,content: ContentIR,allow_gen
         if slide.archetype=='illustration':score+=.55
         elif slide.archetype=='example':score+=.34
         if image_words.search(text):score+=.46
+        if conceptual_words.search(text):score+=.62
         if re.search(r'метафор|визуальн\w* образ|истори|сценар',text,re.I):score+=.28
         if formula_words.search(text):score-=.52
         native_kind=None
         if hierarchy_words.search(text):native_kind='hierarchy'
         elif sequence_words.search(text):native_kind='sequence'
         elif comparison_words.search(text):native_kind='list'
-        if native_kind:score-=.24
+        if native_kind and not conceptual_words.search(text):score-=.24
         score=max(0,min(1,score))
         if score>=.68:
             slide.visual='none';slide.visual_strategy='generated_image';slide.visual_score=round(score,2)
@@ -464,7 +506,11 @@ def plan_with_model(gateway,content,request):
                             focus=assignment.get('focus_terms',[])
                             authored=' '.join([slide.title,slide.takeaway,slide.balanced_message,slide.message])
                             if focus and not _contains_focus(authored,focus):
-                                raise ValueError(f"Slide position {assignment['position']} must ground its title or main idea in one of these focus_terms: {', '.join(focus)}")
+                                # Exact claim assignment is authoritative. TF/IDF
+                                # focus terms are only a weak lexical hint and can
+                                # miss valid paraphrases or surface incidental
+                                # words from OCR/transcript furniture.
+                                log.warning('Slide position %s uses assigned claims without a lexical focus-term match',assignment['position'])
                     forbidden_titles={re.sub(r'\W+',' ',value.casefold()).strip() for value in existing_titles}
                     forbidden_messages={re.sub(r'\W+',' ',value.casefold()).strip() for value in existing_messages}
                     conflict=next((slide.title for slide in plan.slides if re.sub(r'\W+',' ',slide.title.casefold()).strip() in forbidden_titles),None)
@@ -803,6 +849,11 @@ def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, j
             last=si==len(plan.slides)-1
             if (is_cover or last) and dark:
                 p=dark[(si+vi)%len(dark)]
+            elif variant=='A' and dark and (ps.role=='divider' or (si%5==2 and visual=='none')):
+                # The concise mode doubles as an editorial emphasis layout. A
+                # periodic branded background keeps long decks from becoming a
+                # sequence of nearly identical pale pages.
+                p=dark[(si//5+vi)%len(dark)]
             elif variant=='C' or (variant=='B' and visual!='none'):
                 p=plain[(si+vi)%min(3,len(plain))]
             elif ps.role=='divider' and (light or dark):
@@ -839,41 +890,43 @@ def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, j
                 top=.07+title_h+.07
                 if visual!='none':
                     if variant=='A':
-                        lead=body_style.model_copy(deep=True);lead.size=_scale_size(design,22,26)
-                        nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=content_right-.06,h=.23),style=lead,text=lead_text,claim_ids=ps.claim_ids))
-                        vb=Box(x=.11,y=top+.27,w=content_right-.16,h=max(.25,.86-(top+.27)))
+                        lead=body_style.model_copy(deep=True);lead.size=_scale_size(design,22,28)
+                        nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=content_right-.06,h=.20),style=lead,text=lead_text,claim_ids=ps.claim_ids))
+                        vb=Box(x=.08,y=top+.23,w=content_right-.10,h=max(.30,.88-(top+.23)))
                     elif variant=='B':
                         lead=body_style.model_copy(deep=True);lead.size=_scale_size(design,20,22)
-                        left=.36 if branded_slide else .40
-                        nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=left,h=.29),style=lead,text=lead_text,claim_ids=ps.claim_ids))
+                        left=.37 if branded_slide else .41
+                        nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=left,h=.27),style=lead,text=lead_text,claim_ids=ps.claim_ids))
                         if supports:
                             support_style=body_style.model_copy(deep=True);support_style.size=_scale_size(design,18,18)
-                            nodes.append(Node(id=f'{ps.id}-support-1',kind='text',role='support',box=Box(x=.06,y=top+.32,w=left,h=.24),style=support_style,text=supports[0],claim_ids=ps.claim_ids))
-                        vb=Box(x=.50,y=top,w=content_right-.50,h=.50)
+                            nodes.append(Node(id=f'{ps.id}-support-1',kind='text',role='support',box=Box(x=.06,y=top+.31,w=left,h=.28),style=support_style,text=supports[0],claim_ids=ps.claim_ids))
+                        vb=Box(x=.50,y=top,w=content_right-.50,h=.58)
                     else:
                         lead=body_style.model_copy(deep=True);lead.size=_scale_size(design,18,18)
                         nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=.46,h=.25),style=lead,text=lead_text,claim_ids=ps.claim_ids))
                         support_style=body_style.model_copy(deep=True);support_style.size=_scale_size(design,18,18)
                         visible_supports=supports[:2] if sum(map(len,supports[:2]))<=120 else supports[:1]
-                        support_h=.15 if len(visible_supports)>1 else .22
+                        support_top=top+.29;available=max(.11,.90-support_top)
+                        support_h=min(.22,(available-.02*max(0,len(visible_supports)-1))/max(1,len(visible_supports)))
                         for idx,text in enumerate(visible_supports):
-                            nodes.append(Node(id=f'{ps.id}-support-{idx+1}',kind='text',role='support',box=Box(x=.06,y=top+.29+idx*.18,w=.46,h=support_h),style=support_style,text=text,claim_ids=ps.claim_ids))
+                            nodes.append(Node(id=f'{ps.id}-support-{idx+1}',kind='text',role='support',box=Box(x=.06,y=support_top+idx*(support_h+.02),w=.46,h=support_h),style=support_style,text=text,claim_ids=ps.claim_ids))
                         vb=Box(x=.56,y=top,w=.38,h=.50)
                 else:
                     lead_w=content_right-.07
                     if variant=='A':
-                        lead=body_style.model_copy(deep=True);lead.size=_scale_size(design,22,28)
-                        nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=lead_w,h=.34),style=lead,text=lead_text,claim_ids=ps.claim_ids))
+                        lead=body_style.model_copy(deep=True);lead.size=_scale_size(design,24,32)
+                        lead.align='left'
+                        nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=lead_w,h=max(.40,.82-top)),style=lead,text=lead_text,claim_ids=ps.claim_ids))
                     elif variant=='B':
                         lead=body_style.model_copy(deep=True);lead.size=_scale_size(design,20,22)
-                        nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=lead_w,h=.20),style=lead,text=lead_text,claim_ids=ps.claim_ids))
+                        nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=lead_w,h=.24),style=lead,text=lead_text,claim_ids=ps.claim_ids))
                         if supports:
                             support_style=body_style.model_copy(deep=True);support_style.size=_scale_size(design,18,18)
                             cols=min(2,len(supports));col_w=(lead_w-.05)/cols
                             for idx,text in enumerate(supports[:2]):
                                 x=.06+idx*(col_w+.05)
-                                nodes.append(Node(id=f'{ps.id}-support-accent-{idx+1}',kind='text',role='accent',box=Box(x=x,y=top+.26,w=.055,h=.009),style=Style(font=body_style.font,size=18,color=accent,fill=accent),text=''))
-                                nodes.append(Node(id=f'{ps.id}-support-{idx+1}',kind='text',role='support',box=Box(x=x,y=top+.30,w=col_w,h=.28),style=support_style,text=text,claim_ids=ps.claim_ids))
+                                nodes.append(Node(id=f'{ps.id}-support-accent-{idx+1}',kind='text',role='accent',box=Box(x=x,y=top+.30,w=.055,h=.009),style=Style(font=body_style.font,size=18,color=accent,fill=accent),text=''))
+                                nodes.append(Node(id=f'{ps.id}-support-{idx+1}',kind='text',role='support',box=Box(x=x,y=top+.34,w=col_w,h=.31),style=support_style,text=text,claim_ids=ps.claim_ids))
                     else:
                         lead=body_style.model_copy(deep=True);lead.size=_scale_size(design,18,18)
                         nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=lead_w,h=.15),style=lead,text=lead_text,claim_ids=ps.claim_ids))

@@ -2,11 +2,12 @@ import json
 import shutil
 import pytest
 from pptx import Presentation
+from PIL import Image
 from vktech.template import import_template
 from vktech.planning import NeedsInput,build_scenes,validate_plan,plan_with_model,normalize_plan,planning_claims,enrich_plan,fit_semantic_variants,assign_visual_strategies,protect_text_from_template_decor
 from vktech.export import export_pptx,export_html
 from vktech.opc import Package
-from vktech.audit import audit_scene,repair_scene,contrast
+from vktech.audit import audit_scene,audit_rendered_deck,repair_scene,contrast
 from vktech.contracts import Box,PaletteSpec,RepairRequest,GenerateRequest,SceneIR,Slot,Style
 from vktech.palette import palette_from_design,recolor_design,recolor_scene,recolor_template
 from vktech.store import Store,Job
@@ -160,6 +161,25 @@ def test_visual_strategy_uses_native_diagram_for_dependencies(content,plan):
     target.title='DAG зависимостей задач';target.message='Граф показывает зависимости и критический путь между задачами.'
     selected=assign_visual_strategies(draft,content,True).slides[3]
     assert selected.visual_strategy=='diagram' and selected.visual=='hierarchy'
+
+
+def test_visual_strategy_uses_image_for_real_world_model_limit(content,plan):
+    draft=plan.model_copy(deep=True);target=draft.slides[4]
+    target.title='Практическая реализация и ограничения PRAM-модели'
+    target.message='Реальная система показывает data movement, contention и инфраструктурные ограничения.'
+    target.archetype='explanation'
+    selected=assign_visual_strategies(draft,content,True).slides[4]
+    assert selected.visual_strategy=='generated_image'
+
+
+def test_render_audit_detects_repeated_adjacent_composition(template_bytes,content,plan,tmp_path):
+    design=import_template(template_bytes);scene=build_scenes(design,content,enrich_plan(plan,content),'render-audit')[0]
+    scene.slides=[scene.slides[1],scene.slides[1].model_copy(deep=True)]
+    scene.slides[1].id='copy'
+    first=tmp_path/'first.png';second=tmp_path/'second.png'
+    Image.new('RGB',(320,180),'white').save(first);Image.new('RGB',(320,180),'white').save(second)
+    issues=audit_rendered_deck(scene,[first,second])
+    assert any(item.rule=='D29' and item.status=='fail' for item in issues)
 
 
 def test_palette_recolors_scene_design_and_template(template_bytes,content,plan):

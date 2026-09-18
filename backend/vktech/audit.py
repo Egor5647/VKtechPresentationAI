@@ -4,12 +4,16 @@ import os
 import re
 from functools import lru_cache
 from pathlib import Path
-from PIL import ImageFont
+from PIL import Image,ImageFilter,ImageFont
 from .contracts import AuditReport, Issue, ContextualReport, ContextualFailureReport
 
 RULES={
- 'D01':'Элемент вне слайда','D02':'Наложение блоков','D03':'Переполнение текста','D04':'Текст обрезан краем','D05':'Выравнивание по шаблону','D06':'Поля','D07':'Пропорции изображения','D08':'Гарнитуры','D09':'Типографическая шкала','D10':'Палитра','D11':'Происхождение композиции','D12':'Логотип и колонтитул','D13':'Контраст','D14':'Количество пунктов','D15':'Длина пункта','D16':'Размер таблицы','D17':'Количество серий','D18':'Заполнение слайда','D19':'Открываемость','D20':'Заглушки','D21':'Пустой слайд','D22':'Редактируемые объекты','D23':'Подписи диаграммы','D24':'Дублирование слайдов','D25':'Минимальный кегль','D26':'Пустые декоративные контейнеры','D27':'Текст пересекает декоративную область шаблона'}
+ 'D01':'Элемент вне слайда','D02':'Наложение блоков','D03':'Переполнение текста','D04':'Текст обрезан краем','D05':'Выравнивание по шаблону','D06':'Поля','D07':'Пропорции изображения','D08':'Гарнитуры','D09':'Типографическая шкала','D10':'Палитра','D11':'Происхождение композиции','D12':'Логотип и колонтитул','D13':'Контраст','D14':'Количество пунктов','D15':'Длина пункта','D16':'Размер таблицы','D17':'Количество серий','D18':'Заполнение слайда','D19':'Открываемость','D20':'Заглушки','D21':'Пустой слайд','D22':'Редактируемые объекты','D23':'Подписи диаграммы','D24':'Дублирование слайдов','D25':'Минимальный кегль','D26':'Пустые декоративные контейнеры','D27':'Текст пересекает декоративную область шаблона','D28':'Низкая визуальная заполненность рендера','D29':'Слишком похожие соседние композиции'}
 PLACEHOLDER=re.compile(r'\blorem ipsum\b|\bXXX\b|\bTODO\b|вставьте текст|\[Text\]',re.I)
+
+
+def _pixels(image):
+    return image.get_flattened_data() if hasattr(image,'get_flattened_data') else image.getdata()
 
 
 def issue(scene,rule,slide=None,nodes=(),status='fail',message='',severity='warning',repair='none',evidence=None,category='deterministic'):
@@ -81,7 +85,7 @@ def template_text_right(prototype):
 def audit_scene(scene,design,content,opened=False):
     result=[];seen={};pmap={p.id:p for p in design.prototypes}
     for slide in scene.slides:
-        checks={k:[] for k in RULES}
+        checks={k:[] for k in RULES if k not in {'D28','D29'}}
         def add(rule,nodes=(),**kw):
             found=issue(scene,rule,slide,nodes,**kw);checks[rule].append(found)
         for n in slide.nodes:
@@ -165,6 +169,46 @@ def audit_scene(scene,design,content,opened=False):
     required={c.id for c in content.claims if c.required};used={c for s in scene.slides for n in s.nodes for c in n.claim_ids}
     result.append(issue(scene,'FACT_COMPLETENESS',status='pass' if required<=used else 'fail',severity='error',evidence={'missing_claim_ids':sorted(required-used)}))
     return AuditReport(scene_id=scene.id,version=scene.version,issues=result)
+
+
+def _render_edge_coverage(path: Path) -> float:
+    with Image.open(path) as source:
+        image=source.convert('L').resize((320,180),Image.Resampling.LANCZOS).filter(ImageFilter.FIND_EDGES)
+    image=image.crop((4,4,image.width-4,image.height-4))
+    return sum(value>=24 for value in _pixels(image))/max(1,image.width*image.height)
+
+
+def _render_similarity(left: Path,right: Path) -> float:
+    values=[]
+    for path in (left,right):
+        with Image.open(path) as source:
+            image=source.convert('L').resize((96,54),Image.Resampling.LANCZOS).filter(ImageFilter.FIND_EDGES)
+            values.append(list(_pixels(image)))
+    return 1-sum(abs(a-b) for a,b in zip(*values))/(255*len(values[0]))
+
+
+def _geometry_signature(slide):
+    return tuple((node.kind,node.role,*(round(value*12) for value in (node.box.x,node.box.y,node.box.w,node.box.h))) for node in slide.nodes if node.role!='accent')
+
+
+def audit_rendered_deck(scene,previews):
+    """Inspect final pixels and adjacent compositions after independent rendering."""
+    paths=[Path(path) for path in previews];result=[];sparse=[];repeated=[]
+    for index,(slide,path) in enumerate(zip(scene.slides,paths)):
+        coverage=_render_edge_coverage(path)
+        if slide.role=='content' and coverage<.028:
+            sparse.append(slide.id)
+            result.append(issue(scene,'D28',slide,status='fail',message=RULES['D28'],evidence={'edge_coverage':round(coverage,3),'minimum':.028},category='deterministic'))
+        if index:
+            previous=scene.slides[index-1];similarity=_render_similarity(paths[index-1],path)
+            same_geometry=_geometry_signature(previous)==_geometry_signature(slide)
+            same_prototype=previous.prototype_id==slide.prototype_id
+            if same_geometry and same_prototype and similarity>=.965:
+                repeated.append(slide.id)
+                result.append(issue(scene,'D29',slide,status='fail',message=RULES['D29'],evidence={'previous_slide_id':previous.id,'render_similarity':round(similarity,3)},category='deterministic'))
+    if not sparse:result.append(issue(scene,'D28',status='pass',message='Все содержательные слайды используют достаточную долю итогового рендера'))
+    if not repeated:result.append(issue(scene,'D29',status='pass',message='Соседние слайды различаются по композиции'))
+    return result
 
 
 def contextual_audit(gateway,scene,content,images):
