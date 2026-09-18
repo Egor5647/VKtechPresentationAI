@@ -23,6 +23,28 @@ from .smartart import inject
 from .settings import artifact_path
 
 
+def _card_font_size(node,w,h,text,minimum=12):
+    """Fit a complete card label without clipping or shortening its text."""
+    from .audit import font_for
+    from PIL import ImageFont
+    width=max(1,w/914400*96-24);height=max(1,h/914400*96-16)
+    maximum=float(node.style.size)
+    candidates=[];size=maximum
+    while size>=minimum:
+        candidates.append(size);size-=1
+    for size in candidates:
+        font=font_for(node.style.font,max(1,round(size*96/72))) or ImageFont.load_default(size=max(1,round(size*96/72)))
+        lines=0
+        for paragraph in text.split('\n'):
+            current='';lines+=1
+            for word in paragraph.split():
+                candidate=(current+' '+word).strip()
+                if current and font.getlength(candidate)>width:lines+=1;current=word
+                else:current=candidate
+        if lines*size*96/72*1.16<=height:return size
+    return float(minimum)
+
+
 def _card(out,node,x,y,w,h,text,name,fill,foreground,bold=False):
     sh=out.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,x,y,w,h)
     sh.name=name;sh.fill.solid();sh.fill.fore_color.rgb=RGBColor.from_string(fill)
@@ -30,7 +52,7 @@ def _card(out,node,x,y,w,h,text,name,fill,foreground,bold=False):
     tf=sh.text_frame;tf.clear();tf.word_wrap=True;tf.vertical_anchor=MSO_ANCHOR.MIDDLE
     tf.margin_left=tf.margin_right=Pt(9);tf.margin_top=tf.margin_bottom=Pt(6)
     p=tf.paragraphs[0];p.text=text;p.alignment=PP_ALIGN.CENTER
-    p.font.name=node.style.font;p.font.size=Pt(node.style.size);p.font.bold=bold;p.font.color.rgb=RGBColor.from_string(foreground)
+    p.font.name=node.style.font;p.font.size=Pt(_card_font_size(node,w,h,text));p.font.bold=bold;p.font.color.rgb=RGBColor.from_string(foreground)
     return sh
 
 

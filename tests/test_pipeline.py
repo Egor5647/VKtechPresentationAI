@@ -5,10 +5,10 @@ from pptx import Presentation
 from PIL import Image
 from vktech.template import import_template
 from vktech.planning import NeedsInput,build_scenes,validate_plan,plan_with_model,normalize_plan,planning_claims,enrich_plan,fit_semantic_variants,assign_visual_strategies,protect_text_from_template_decor
-from vktech.export import export_pptx,export_html
+from vktech.export import export_pptx,export_html,_card_font_size
 from vktech.opc import Package
 from vktech.audit import audit_scene,audit_rendered_deck,repair_scene,contrast
-from vktech.contracts import Box,PaletteSpec,RepairRequest,GenerateRequest,SceneIR,Slot,Style
+from vktech.contracts import Box,Node,PaletteSpec,RepairRequest,GenerateRequest,SceneIR,Slot,Style
 from vktech.palette import palette_from_design,recolor_design,recolor_scene,recolor_template
 from vktech.store import Store,Job
 from vktech.worker import execute
@@ -180,6 +180,12 @@ def test_render_audit_detects_repeated_adjacent_composition(template_bytes,conte
     Image.new('RGB',(320,180),'white').save(first);Image.new('RGB',(320,180),'white').save(second)
     issues=audit_rendered_deck(scene,[first,second])
     assert any(item.rule=='D29' and item.status=='fail' for item in issues)
+
+
+def test_diagram_card_font_shrinks_to_keep_full_label_inside():
+    node=Node(id='visual',kind='diagram',role='visual',box=Box(x=0,y=0,w=.38,h=.5),style=Style(font='Arial',size=20),data={})
+    fitted=_card_font_size(node,2_200_000,1_000_000,'Level-by-level: ждёт завершения уровня')
+    assert 12<=fitted<20
 
 
 def test_palette_recolors_scene_design_and_template(template_bytes,content,plan):
