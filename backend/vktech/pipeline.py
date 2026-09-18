@@ -192,7 +192,7 @@ class Pipeline:
         labels={'A':'Крупно и кратко','B':'Сбалансированно','C':'Подробно'};result=[]
         for index,slide in enumerate(plan.slides):
             options={v:{'label':labels[v],'preview':variants[v]['previews'][index],'score':scores.get(slide.id,{}).get(v,0),'reasons':reasons.get(slide.id,{}).get(v,{})} for v in ('A','B','C')}
-            result.append({'id':slide.id,'title':slide.title,'archetype':slide.archetype,'lead':slide.message,'support_points':slide.support_points,'takeaway':slide.takeaway,'selected':selection.get(slide.id,'A'),'options':options})
+            result.append({'id':slide.id,'title':slide.title,'archetype':slide.archetype,'lead':slide.message,'balanced_message':slide.balanced_message,'support_points':slide.support_points,'takeaway':slide.takeaway,'selected':selection.get(slide.id,'A'),'options':options})
         return result
 
     def _compose(self,job,payload,folder,started,stage):

@@ -41,6 +41,10 @@ def test_gateway_schema_retry_and_final_provider(plan,monkeypatch):
     assert body['response_format']['json_schema']['schema']['title']=='PresentationPlan'
     assert body['response_format']['json_schema']['schema']['properties']['slides']['minItems']==12
     assert body['response_format']['json_schema']['schema']['properties']['slides']['maxItems']==12
+    slide_schema=body['response_format']['json_schema']['schema']['$defs']['PlanSlide']
+    assert slide_schema['properties']['message']['maxLength']==260
+    assert slide_schema['properties']['message']['pattern']=='.*[.!?)]$'
+    assert {'takeaway','balanced_message','support_points','visual_items'}<=set(slide_schema['required'])
     with pytest.raises(ValueError):validate_manifest({'text':{'parameters':36_000_000_000,'license':'Apache-2.0','open_weights':True}})
 
 

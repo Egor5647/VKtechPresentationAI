@@ -2,9 +2,9 @@ version: 1
 slide_count: 12
 deadline_seconds: 300
 variants:
-  - {id: A, label: Последовательное изложение, composition: sequential}
-  - {id: B, label: Визуальное объяснение, composition: visual}
-  - {id: C, label: Сравнения и показатели, composition: comparison}
+  - {id: A, label: Крупно и кратко, composition: concise}
+  - {id: B, label: Сбалансированно, composition: balanced}
+  - {id: C, label: Подробно, composition: detailed}
 brand_conflict_policy: effective_pptx
 diagrams: native_shapes
 max_upload_bytes: 104857600

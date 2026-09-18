@@ -47,7 +47,13 @@ def _diagram(out,node,xywh):
         line.name=f'{node.id}-connector-{index}';line.line.color.rgb=RGBColor.from_string(accent);line.line.width=Pt(2)
     if layout=='sequence':
         count=len(items)
-        if count>=4 or max(map(len,items),default=0)>52:
+        if count>=3 and w/h<1.6:
+            ch=(h-vgap*(count-1))//count;cx=x
+            for i,item in enumerate(items):
+                cy=y+i*(ch+vgap)
+                if i:connector(x+w//2,cy-vgap,x+w//2,cy,i)
+                _card(out,node,cx,cy,w,ch,item,f'{node.id}-card-{i+1}',accent if i==0 else surface,white if i==0 else dark,i==0)
+        elif count>=4 or max(map(len,items),default=0)>52:
             cols=2;rows=(count+1)//2;cw=(w-gap)//2;ch=(h-vgap*(rows-1))//rows
             positions=[]
             for i,item in enumerate(items):
@@ -75,7 +81,7 @@ def _diagram(out,node,xywh):
             cx=x+i*(child_w+gap)
             _card(out,node,cx,child_y,child_w,child_h,item,f'{node.id}-card-{i+2}',surface,dark)
     else:
-        cols=2 if len(items)>1 else 1;rows=(len(items)+cols-1)//cols
+        cols=1 if w/h<1.6 else 2 if len(items)>1 else 1;rows=(len(items)+cols-1)//cols
         cw=(w-gap*(cols-1))//cols;ch=(h-vgap*(rows-1))//rows
         for i,item in enumerate(items):
             col=i%cols;row=i//cols
@@ -260,13 +266,15 @@ def export_html(scene,path,backgrounds=None):
                 data=n.data;headers=[data['title']]+[name+' ('+data['unit']+')' for name in data['series']]
                 rows=[headers]+[[cat]+[str(v[j]) for v in data['series'].values()] for j,cat in enumerate(data['categories'])]
                 body='<table>'+''.join('<tr>'+''.join(f'<{"th" if ri==0 else "td"}>{html.escape(cell)}</{"th" if ri==0 else "td"}>' for cell in row)+'</tr>' for ri,row in enumerate(rows))+'</table>'
-            elif n.kind in {'diagram','smartart'}:body='<ol class="diagram '+n.data.get('layout','list')+'">'+''.join('<li>'+html.escape(t)+'</li>' for t in n.data.get('items',[]))+'</ol>'
+            elif n.kind in {'diagram','smartart'}:
+                layout=n.data.get('layout','list');orientation=' vertical' if layout=='sequence' and n.box.w/n.box.h<1.6 else ''
+                body='<ol class="diagram '+layout+orientation+'">'+''.join('<li>'+html.escape(t)+'</li>' for t in n.data.get('items',[]))+'</ol>'
             elif n.kind=='image':body='<img alt="'+html.escape(n.data['description'],quote=True)+'" src="data:'+n.data.get('media_type','image/png')+';base64,'+base64.b64encode(artifact_path(n.data['path']).read_bytes()).decode()+'">'
             else:body=''
             nodes.append(f'<div class="node {n.kind}" data-element-id="{html.escape(n.id,quote=True)}" style="{style}">{body}</div>')
         slides.append(f'<section class="slide" aria-label="{html.escape(slide.title,quote=True)}" style="background:#{slide.background}">{bg}{"".join(nodes)}</section>')
     doc='''<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Презентация</title><style>
-body{margin:0;background:#d9dce3;font-family:Arial}main{max-width:1400px;margin:auto}.slide{position:relative;aspect-ratio:16/9;container-type:inline-size;margin:24px 0;overflow:hidden}.decor{position:absolute;width:100%;height:100%;inset:0}.node{position:absolute;box-sizing:border-box;line-height:1.2;overflow:visible}.node img,.node svg{width:100%;height:100%;object-fit:contain}.node table{border-collapse:collapse;width:100%;height:100%;font-size:.7em}.node td,.node th{padding:.2em;border:1px solid currentColor}.diagram{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;height:100%;gap:4%;font-size:.8em}.diagram li{background:#e8eef6;padding:.4em;border-radius:8px;flex:1}.diagram.sequence{flex-direction:row}.controls{position:fixed;right:20px;bottom:20px;z-index:20;background:#172438;color:white;border:0;border-radius:8px;padding:10px 14px}.controls button{color:white;background:transparent;border:0;font-size:18px}.controls span{padding:0 8px}@media print{body{background:white}.slide{margin:0;break-after:page}.controls{display:none}main{max-width:none}}@supports not (font-size:1cqw){.node{font-size:18px!important}}
+body{margin:0;background:#d9dce3;font-family:Arial}main{max-width:1400px;margin:auto}.slide{position:relative;aspect-ratio:16/9;container-type:inline-size;margin:24px 0;overflow:hidden}.decor{position:absolute;width:100%;height:100%;inset:0}.node{position:absolute;box-sizing:border-box;line-height:1.2;overflow:visible}.node img,.node svg{width:100%;height:100%;object-fit:contain}.node table{border-collapse:collapse;width:100%;height:100%;font-size:.7em}.node td,.node th{padding:.2em;border:1px solid currentColor}.diagram{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;height:100%;gap:4%;font-size:.8em}.diagram li{background:#e8eef6;padding:.4em;border-radius:8px;flex:1}.diagram.sequence{flex-direction:row}.diagram.sequence.vertical{flex-direction:column}.controls{position:fixed;right:20px;bottom:20px;z-index:20;background:#172438;color:white;border:0;border-radius:8px;padding:10px 14px}.controls button{color:white;background:transparent;border:0;font-size:18px}.controls span{padding:0 8px}@media print{body{background:white}.slide{margin:0;break-after:page}.controls{display:none}main{max-width:none}}@supports not (font-size:1cqw){.node{font-size:18px!important}}
 </style><main>'''+''.join(slides)+'''</main><nav class="controls" aria-label="Навигация"><button type="button" data-dir="-1" aria-label="Предыдущий слайд">←</button><span></span><button type="button" data-dir="1" aria-label="Следующий слайд">→</button></nav><script>
 const slides=[...document.querySelectorAll('.slide')],label=document.querySelector('.controls span');let index=0;
 function show(i){index=Math.max(0,Math.min(slides.length-1,i));slides.forEach((s,j)=>s.hidden=j!==index);label.textContent=`${index+1} / ${slides.length}`;slides[index].focus?.()}

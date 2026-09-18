@@ -162,7 +162,9 @@ def contextual_audit(gateway,scene,content,images):
     from PIL import Image,ImageDraw
     failures_only=os.environ.get('MODEL_AUDIT_MODE','failures')=='failures'
     schema=ContextualFailureReport if failures_only else ContextualReport
-    claim_limit=max(200,int(os.environ.get('MODEL_AUDIT_CLAIM_CHARS','320')))
+    # Preserve enough of each source block for the auditor to see formulas,
+    # qualifications and counterexamples that commonly occur after the heading.
+    claim_limit=max(400,int(os.environ.get('MODEL_AUDIT_CLAIM_CHARS','900')))
     used_claims={cid for slide in scene.slides for node in slide.nodes for cid in node.claim_ids}
     compact_content={'id':content.id,'title':content.title,'language':content.language,'claims':[{'id':c.id,'text':c.text[:claim_limit],'source':c.source,'required':c.required} for c in content.claims if c.id in used_claims]}
     compact_scene={'id':scene.id,'variant':scene.variant,'slides':[]}

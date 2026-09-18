@@ -13,6 +13,193 @@ class NeedsInput(ValueError):
     pass
 
 
+_BOILERPLATE=re.compile(
+    r'^(?:параллельные алгоритмы\s*\|.*|конспект лекции\s*[·•]\s*стр\.?\s*\d+|'
+    r'таймкод\s*:.*|материал лекции|дополнительное пояснение|интерпретация|'
+    r'что важно запомнить|главные идеи|вопросы для самопроверки)$',re.I
+)
+_FOCUS_STOP={
+    'алгоритм','алгоритмы','параллельные','параллельных','лекция','лекции','материал',
+    'пояснение','вопрос','ответ','пример','основные','основной','ключевые','который',
+    'которая','которые','через','после','перед','также','может','нужно','этого','затем',
+    'work','span','pram','задачи','задача','модель','метрики','метрика','выполнение',
+    'interview','notes','pageref','документ','построен','предоставленной','внешнего',
+    'учебника','источник','страницы','страниц','кликабельны','записи','лекций',
+}
+_DIRECTIONAL_MARKERS={
+    'maximize':r'\bмаксимиз\w*|\bнаибольш\w*',
+    'upper_bound':r'\bне\s+(?:более|выше)|\bне\s+превыш\w*|≤|\bверхн\w*\s+границ\w*',
+    'lower_bound':r'\bне\s+(?:менее|ниже|меньше)|≥|\bнижн\w*\s+границ\w*',
+}
+
+
+def _planning_text(value: str) -> str:
+    """Remove presentation furniture while preserving source facts verbatim."""
+    value=_canonicalize_math(value)
+    lines=[]
+    for line in value.splitlines():
+        line=line.strip()
+        if not line or _BOILERPLATE.fullmatch(line):continue
+        line=re.sub(r'^(?:короткий хороший ответ|более глубокий ответ)\s*:\s*','',line,flags=re.I)
+        line=re.sub(r'\s*[·•]\s*с\.\s*\d+(?:\s*[–—-]\s*\d+)?\s*$','',line,flags=re.I)
+        if line:lines.append(line)
+    return '\n'.join(lines)
+
+
+def _tokens(value: str) -> list[str]:
+    return [token.lower() for token in re.findall(r'[A-Za-zА-Яа-яЁё][\w+#/-]{3,}',value)]
+
+
+def _focus_terms(group,all_claims,limit=12) -> list[str]:
+    """Find terms that distinguish one assigned source block from the deck."""
+    documents=[set(_tokens(claim.text)) for claim in all_claims]
+    frequency={token:sum(token in document for document in documents) for document in documents for token in document}
+    candidates=[]
+    for claim in group:
+        for position,token in enumerate(_tokens(claim.text)):
+            if token in _FOCUS_STOP or token.isdigit() or len(token)<5:continue
+            df=frequency.get(token,1)
+            if df>max(2,round(len(documents)*.3)):continue
+            latin=bool(re.search(r'[a-z]',token))
+            score=(.5 if latin else 0)+(len(token)>=8)*2+(len(documents)-df)/max(1,len(documents))-position/1000
+            candidates.append((score,token))
+    result=[]
+    for _,token in sorted(candidates,reverse=True):
+        if token not in result:result.append(token)
+        if len(result)>=limit:break
+    return result
+
+
+def _contains_focus(value: str,terms) -> bool:
+    words=_tokens(value)
+    for term in terms:
+        stem=term[:6] if len(term)>=7 else term
+        if any(word.startswith(stem) or stem.startswith(word[:6]) for word in words):return True
+    return False
+
+
+def _directional_markers(value: str) -> set[str]:
+    return {name for name,pattern in _DIRECTIONAL_MARKERS.items() if re.search(pattern,value,re.I)}
+
+
+def _phrase_key(value: str) -> str:
+    return re.sub(r'\W+',' ',value.casefold()).strip()
+
+
+def _semantic_tokens(value: str) -> set[str]:
+    """Lightweight stems for catching near-identical slide ideas."""
+    return {token[:6] for token in _tokens(value) if len(token)>=4 and token not in _FOCUS_STOP}
+
+
+def _near_duplicate(left: str,right: str) -> bool:
+    a=_semantic_tokens(left);b=_semantic_tokens(right);shared=a&b
+    return len(shared)>=6 and len(shared)/max(1,min(len(a),len(b)))>=.62
+
+
+def _complete_sentence(value: str) -> bool:
+    value=value.rstrip()
+    return bool(value and re.search(r'[.!?)]$',value))
+
+
+def _looks_finished(value: str) -> bool:
+    """Reject obvious grammar-boundary artefacts without language guessing."""
+    value=value.rstrip()
+    if not _complete_sentence(value) or re.search(r'[,;:]\s*[.!?)]$',value):return False
+    words=re.findall(r'[A-Za-zА-Яа-яЁё]+',value[:-1])
+    if not words:return True
+    last=words[-1]
+    if re.search(r'[A-Za-z]',last) and re.search(r'[А-Яа-яЁё]',last):return False
+    if last==last.casefold() and last.casefold() in {'и','а','но','или','что','как','если','для','при','над','под','без','из','от','по','на','в','к','с'}:return False
+    if re.fullmatch(r'[а-яё]{1,3}',last) and last==last.casefold():return False
+    return True
+
+
+def _sentence(value: str) -> str:
+    value=_clean_text(value).rstrip(' .!?')
+    return value+'.' if value else ''
+
+
+def _canonicalize_math(value: str) -> str:
+    """Repair common PDF glyph extraction errors when the notation is unambiguous."""
+    return re.sub(r'[T𝑇]!', 'T_P', value)
+
+
+def _sentence_units(value: str) -> list[str]:
+    return [part.strip() for part in re.findall(r'.+?(?:[.!?](?=\s|$)|$)',value) if part.strip()]
+
+
+def _repeats_unit(left: str,right: str) -> bool:
+    left_key,right_key=_phrase_key(left),_phrase_key(right)
+    if left_key==right_key or left_key in right_key or right_key in left_key:return True
+    a,b=_semantic_tokens(left),_semantic_tokens(right);shared=a&b
+    return len(shared)>=4 and len(shared)/max(1,min(len(a),len(b)))>=.85
+
+
+def _dedupe_sentences(value: str) -> str:
+    result=[]
+    for unit in _sentence_units(_canonicalize_math(value)):
+        if any(_repeats_unit(unit,previous) for previous in result):continue
+        result.append(unit)
+    return ' '.join(result)
+
+
+def _compose(base: str, additions, limit: int, forbidden=(), minimum=0, prefer_longest=True) -> str | None:
+    forbidden={_phrase_key(value) for value in forbidden}
+    candidates=[base]
+    for addition in (_sentence(value) for value in additions if value):
+        for chosen in list(candidates):
+            if any(_repeats_unit(addition,unit) for unit in _sentence_units(chosen)):continue
+            candidate=(chosen+' '+addition).strip()
+            if len(candidate)<=limit and candidate not in candidates:candidates.append(candidate)
+    valid=[value for value in candidates if minimum<=len(value)<=limit and _phrase_key(value) not in forbidden]
+    chooser=max if prefer_longest else min
+    return chooser(valid,key=len,default=None)
+
+
+def fit_semantic_variants(plan: PresentationPlan) -> PresentationPlan:
+    """Fit authored whole thoughts by composing complete model-written units."""
+    result=plan.model_copy(deep=True)
+    for slide in result.slides:
+        # Old stored plans may not yet contain authored density variants. They
+        # retain the compatibility path in enrich_plan.
+        if not slide.takeaway or not slide.balanced_message:continue
+        supports=[_dedupe_sentences(_clean_text(value)) for value in slide.support_points if _looks_finished(value) and len(value)<=110]
+        slide.support_points=supports[:3]
+        title_sentence=_sentence(slide.title)
+        concise=_dedupe_sentences(slide.takeaway) if len(slide.takeaway)<=130 and _looks_finished(slide.takeaway) else ''
+        if not concise:
+            concise=next((value for value in [*supports,slide.balanced_message,slide.message,title_sentence] if len(value)<=130 and _looks_finished(value)),title_sentence)
+        authored_balanced=_dedupe_sentences(slide.balanced_message)
+        balanced=authored_balanced if len(authored_balanced)<=180 and _looks_finished(authored_balanced) else ''
+        balanced_tokens=_semantic_tokens(balanced);concise_tokens=_semantic_tokens(concise)
+        shallow_balanced=balanced and _near_duplicate(balanced,concise) and len(balanced_tokens)<len(concise_tokens)*1.45
+        if not balanced or shallow_balanced or _phrase_key(balanced)==_phrase_key(concise) or len(balanced)<len(concise)+8:
+            additions=[*_sentence_units(authored_balanced),*supports]
+            target=min(180,max(75,len(concise)+8))
+            balanced=_compose(concise,additions,180,[concise],target,False) or _compose(concise,[title_sentence],180,[concise],target,False) or title_sentence
+        authored_detailed=_dedupe_sentences(slide.message)
+        detailed=authored_detailed if len(authored_detailed)<=220 and _looks_finished(authored_detailed) else ''
+        detailed_tokens=_semantic_tokens(detailed)
+        shallow_repeat=detailed and _near_duplicate(detailed,concise) and len(detailed_tokens)<len(concise_tokens)*1.45
+        if not detailed or shallow_repeat or _phrase_key(detailed) in {_phrase_key(concise),_phrase_key(balanced)} or len(detailed)<len(balanced)+8:
+            additions=[*_sentence_units(authored_detailed),*supports,*_sentence_units(authored_balanced)]
+            target=min(220,len(balanced)+8)
+            detailed=_compose(concise,additions,220,[concise,balanced],target,True) or _compose(balanced,additions,220,[concise,balanced],target,True)
+        if not detailed:
+            detailed=_compose(concise,[title_sentence],220,[concise,balanced]) or balanced
+        slide.takeaway=concise;slide.balanced_message=balanced;slide.message=detailed
+    return result
+
+
+def fit_titles(plan: PresentationPlan) -> PresentationPlan:
+    result=plan.model_copy(deep=True)
+    for slide in result.slides:
+        if len(slide.title)>76 and ':' in slide.title:
+            shorter=_clean_text(slide.title.split(':',1)[0])
+            if len(shorter)>=20:slide.title=shorter
+    return result
+
+
 def planning_claims(content: ContentIR, brief: str) -> list:
     """Bound model context while retaining every explicitly mandatory claim."""
     limit=max(1,int(os.environ.get('MODEL_MAX_PLANNING_CLAIMS','32')))
@@ -48,6 +235,13 @@ def normalize_plan(plan: PresentationPlan) -> PresentationPlan:
     """Repair optional visual intents and enforce a useful native-visual quota."""
     result=plan.model_copy(deep=True)
     for slide in result.slides:
+        slide.title=_canonicalize_math(slide.title)
+        slide.message=_dedupe_sentences(slide.message)
+        slide.balanced_message=_dedupe_sentences(slide.balanced_message)
+        slide.takeaway=_dedupe_sentences(slide.takeaway)
+        slide.support_points=list(dict.fromkeys(_dedupe_sentences(value) for value in slide.support_points if value.strip()))
+        slide.visual_items=list(dict.fromkeys(_canonicalize_math(value) for value in slide.visual_items if value.strip()))
+        slide.visual_brief=_canonicalize_math(slide.visual_brief)
         if slide.visual=='image' and not slide.asset_id:slide.visual='none'
         if slide.visual in {'chart','table'} and not slide.dataset_id:slide.visual='none'
     candidates=[s for s in result.slides if s.role=='content' and not s.dataset_id and not s.asset_id]
@@ -83,6 +277,8 @@ def enrich_plan(plan: PresentationPlan,content: ContentIR) -> PresentationPlan:
             sentences=[x.strip() for x in re.split(r'(?<=[.!?])\s+',slide.message) if x.strip()]
             slide.takeaway=_clean_text(sentences[-1] if sentences else slide.message)
         else:slide.takeaway=_clean_text(slide.takeaway)
+        slide.balanced_message=_clean_text(slide.balanced_message or slide.message)
+        slide.visual_items=[_clean_text(item) for item in slide.visual_items[:3] if item.strip()]
         if not slide.visual_brief:
             slide.visual_brief=_complete_excerpt(slide.title+': '+slide.message,260)
         else:slide.visual_brief=_complete_excerpt(slide.visual_brief,260)
@@ -94,8 +290,8 @@ def validate_plan(plan: PresentationPlan, content: ContentIR, count: int):
     if plan.status=='needs_input': raise NeedsInput(plan.reason)
     if len(plan.slides)!=count: raise ValueError('Model did not preserve requested slide count')
     if len({s.id for s in plan.slides})!=count: raise ValueError('Duplicate slide IDs')
-    claims={c.id for c in content.claims}; datasets={d.id for d in content.datasets}; assets={a.id for a in content.assets}
-    used=set();fingerprints=set();titles=set();messages=set()
+    claims={c.id for c in content.claims};claim_map={c.id:c for c in content.claims};datasets={d.id for d in content.datasets}; assets={a.id for a in content.assets}
+    used=set();fingerprints=set();titles=set();messages=set();authored_messages=[]
     source_numbers=set(re.findall(r'\d+(?:[.,]\d+)?', ' '.join(c.text for c in content.claims)+ ' '.join(str(x) for d in content.datasets for v in d.series.values() for x in v)))
     for slide in plan.slides:
         if not set(slide.claim_ids)<=claims: raise ValueError('Unknown claim reference')
@@ -107,19 +303,35 @@ def validate_plan(plan: PresentationPlan, content: ContentIR, count: int):
         normalized_message=re.sub(r'\W+',' ',slide.message.casefold()).strip()
         if normalized_title in titles:raise ValueError('Plan contains duplicate slide title: '+slide.title)
         if normalized_message in messages:raise ValueError('Plan contains duplicate main idea: '+slide.title)
+        if any(_near_duplicate(slide.message,previous) for previous in authored_messages):
+            raise ValueError('Plan contains near-duplicate main ideas: '+slide.title)
         titles.add(normalized_title);messages.add(normalized_message)
+        authored_messages.append(slide.message)
+        if slide.balanced_message:
+            versions={_phrase_key(slide.takeaway),_phrase_key(slide.balanced_message),_phrase_key(slide.message)}-{''}
+            if len(versions)<3:raise ValueError('Density modes repeat the same text on slide: '+slide.title)
+            if not len(slide.takeaway)<len(slide.balanced_message)<len(slide.message):
+                raise ValueError('Density modes do not increase semantic detail on slide: '+slide.title)
         fingerprint=(normalized_title,normalized_message)
         if fingerprint in fingerprints:raise ValueError('Plan contains duplicate slides: '+slide.title)
         fingerprints.add(fingerprint)
-        visible=' '.join([slide.title,slide.message,slide.takeaway,*slide.support_points])
+        visible=' '.join([slide.title,slide.message,slide.balanced_message,slide.takeaway,*slide.support_points,*slide.visual_items])
         if re.search(r'…|\.\.\.',visible):raise ValueError('Plan contains mechanically truncated text: '+slide.title)
+        if re.search(r'[T𝑇]!',visible):raise ValueError('Plan contains a corrupted T_P formula on slide: '+slide.title)
+        prose=[slide.message,*([slide.balanced_message] if slide.balanced_message else []),*([slide.takeaway] if slide.takeaway else []),*slide.support_points]
+        if any(not _looks_finished(value) for value in prose):raise ValueError('Plan contains an unfinished sentence on slide: '+slide.title)
         # Prompts target 150/90/110 characters. These wider guardrails absorb
         # small-model counting variance while still rejecting prose that cannot
         # reasonably fit any composition. Layouts select whole authored fields;
         # they never clip a field to meet these limits.
         if len(slide.message)>220:raise ValueError(f'Plan message exceeds 220 characters on slide: {slide.title}')
+        if slide.balanced_message and len(slide.balanced_message)>180:raise ValueError(f'Plan balanced message exceeds 180 characters on slide: {slide.title}')
         if slide.takeaway and len(slide.takeaway)>130:raise ValueError(f'Plan takeaway exceeds 130 characters on slide: {slide.title}')
-        if any(len(point)>150 for point in slide.support_points):raise ValueError(f'Plan support point exceeds 150 characters on slide: {slide.title}')
+        if any(len(point)>110 for point in slide.support_points):raise ValueError(f'Plan support point exceeds 110 characters on slide: {slide.title}')
+        if any(len(item)>80 for item in slide.visual_items):raise ValueError(f'Plan visual item exceeds 80 characters on slide: {slide.title}')
+        source=' '.join(claim_map[cid].text for cid in slide.claim_ids if cid in claim_map)
+        unsupported=_directional_markers(visible)-_directional_markers(source)
+        if unsupported:raise ValueError(f'Plan changes comparison or optimization direction on slide {slide.title}: {", ".join(sorted(unsupported))}')
         invented=set(re.findall(r'\d+(?:[.,]\d+)?',visible))-source_numbers
         if invented: raise ValueError('Plan introduces numbers absent from source: '+', '.join(sorted(invented)))
         used.update(slide.claim_ids)
@@ -168,7 +380,7 @@ def plan_with_model(gateway,content,request):
     selected_ids={claim.id for claim in selected_claims}
     # Source order gives the planner a stable narrative spine. Ranking is used
     # only to choose what fits in the bounded context.
-    planning_content.claims=[claim for claim in content.claims if claim.id in selected_ids]
+    planning_content.claims=[claim.model_copy(update={'text':_planning_text(claim.text)}) for claim in content.claims if claim.id in selected_ids]
     planning_assets={item[3].id:item[3] for item in catalog+selected}
     planning_content.assets=list(planning_assets.values())
     required=[c.id for c in content.claims if c.required]
@@ -188,7 +400,7 @@ def plan_with_model(gateway,content,request):
         def request_plan(batch_payload,batch_content,batch_count,existing_titles=(),existing_messages=(),assignments=()):
             error=None
             for attempt in range(3):
-                plan=normalize_plan(gateway.structured('planning',batch_payload,PresentationPlan,images=model_images))
+                plan=fit_semantic_variants(normalize_plan(gateway.structured('planning',batch_payload,PresentationPlan,images=model_images)))
                 # IDs are transport metadata, not authored content. Small local
                 # models often repeat them even when every slide is distinct.
                 # Assign deterministic batch IDs here; global IDs are assigned
@@ -201,12 +413,20 @@ def plan_with_model(gateway,content,request):
                         for slide,assignment in zip(plan.slides,assignments):
                             if set(slide.claim_ids)!=set(assignment['claim_ids']):
                                 raise ValueError(f"Slide position {assignment['position']} must use exactly these claim_ids: {', '.join(assignment['claim_ids'])}")
+                            if not slide.balanced_message:
+                                raise ValueError(f"Slide position {assignment['position']} must contain balanced_message")
+                            focus=assignment.get('focus_terms',[])
+                            authored=' '.join([slide.title,slide.takeaway,slide.balanced_message,slide.message])
+                            if focus and not _contains_focus(authored,focus):
+                                raise ValueError(f"Slide position {assignment['position']} must ground its title or main idea in one of these focus_terms: {', '.join(focus)}")
                     forbidden_titles={re.sub(r'\W+',' ',value.casefold()).strip() for value in existing_titles}
                     forbidden_messages={re.sub(r'\W+',' ',value.casefold()).strip() for value in existing_messages}
                     conflict=next((slide.title for slide in plan.slides if re.sub(r'\W+',' ',slide.title.casefold()).strip() in forbidden_titles),None)
                     if conflict:raise ValueError('Plan repeats a title from an earlier segment: '+conflict)
                     conflict=next((slide.title for slide in plan.slides if re.sub(r'\W+',' ',slide.message.casefold()).strip() in forbidden_messages),None)
                     if conflict:raise ValueError('Plan repeats a main idea from an earlier segment: '+conflict)
+                    conflict=next((slide.title for slide in plan.slides if any(_near_duplicate(slide.message,previous) for previous in existing_messages)),None)
+                    if conflict:raise ValueError('Plan repeats a near-duplicate idea from an earlier segment: '+conflict)
                     return plan
                 except NeedsInput:
                     raise
@@ -220,7 +440,7 @@ def plan_with_model(gateway,content,request):
                             {'position':index+1,'title':slide.title,'message':slide.message,'claim_ids':slide.claim_ids}
                             for index,slide in enumerate(plan.slides)
                         ]
-                        batch_payload['correction']='Return a complete corrected plan. Inspect previous_slide_outline and replace every repeated title or main idea with a distinct source-backed teaching step. Do not return the same outline again. Every required_claim_id must occur in at least one slide.claim_ids.'
+                        batch_payload['correction']='Return a complete corrected plan. Fix validation_feedback exactly. Use each slide_assignment focus_terms in takeaway, balanced_message and message. Preserve comparison direction and optimization meaning. Make the three density texts independently complete and visibly different. Rewrite every overlong field as a shorter complete sentence; never cut a word or clause. Replace every repeated or near-duplicate title or main idea with a distinct source-backed teaching step. Every required_claim_id must occur in at least one slide.claim_ids.'
             raise error
 
         # Small local models tend to repeat a short tail when constrained to one
@@ -240,7 +460,7 @@ def plan_with_model(gateway,content,request):
                 first=len(combined);last=first+batch_count
                 if claim_groups:
                     groups=claim_groups[first:last];batch_claims=[claim for group in groups for claim in group]
-                    assignments=[{'position':first+local+1,'claim_ids':[claim.id for claim in group]} for local,group in enumerate(groups)]
+                    assignments=[{'position':first+local+1,'claim_ids':[claim.id for claim in group],'focus_terms':_focus_terms(group,claims)} for local,group in enumerate(groups)]
                 else:
                     start=len(claims)*index//batch_total;end=len(claims)*(index+1)//batch_total
                     batch_claims=claims[start:end];assignments=[]
@@ -254,12 +474,14 @@ def plan_with_model(gateway,content,request):
                     slide.id=f'slide-{len(combined)+1}';combined.append(slide)
                 existing_titles.extend(slide.title for slide in batch.slides)
                 existing_messages.extend(slide.message for slide in batch.slides)
-            plan=normalize_plan(PresentationPlan(slides=combined))
+            plan=fit_titles(fit_semantic_variants(normalize_plan(PresentationPlan(slides=combined))))
             validate_plan(plan,content,request.slide_count)
-            return enrich_plan(plan,content)
+            final=fit_titles(fit_semantic_variants(enrich_plan(plan,content)))
+            validate_plan(final,content,request.slide_count)
+            return final
 
         plan=request_plan(payload,content,request.slide_count)
-        return enrich_plan(plan,content)
+        return fit_titles(enrich_plan(plan,content))
 
 
 def regenerate_slide_with_model(gateway,slide,content,instruction):
@@ -267,14 +489,21 @@ def regenerate_slide_with_model(gateway,slide,content,instruction):
     payload={'instruction':instruction,'current_slide':slide.model_dump(),'claims':[c.model_dump() for c in selected]}
     revision=gateway.structured('regenerate_slide',payload,SlideRevision)
     source_numbers=set(re.findall(r'\d+(?:[.,]\d+)?',' '.join(c.text for c in selected)))
-    visible=' '.join([revision.title,revision.message,revision.takeaway,*revision.support_points])
+    visible=' '.join([revision.title,revision.message,revision.balanced_message,revision.takeaway,*revision.support_points,*revision.visual_items])
     if re.search(r'…|\.\.\.',visible):raise ValueError('Slide regeneration returned mechanically truncated text')
-    if len(revision.message)>220 or len(revision.takeaway)>130 or any(len(point)>150 for point in revision.support_points):
+    if any(not _complete_sentence(value) for value in [revision.message,revision.balanced_message,revision.takeaway,*revision.support_points]):
+        raise ValueError('Slide regeneration returned an unfinished sentence')
+    if len(revision.message)>220 or len(revision.balanced_message)>180 or len(revision.takeaway)>130 or any(len(point)>110 for point in revision.support_points) or any(len(item)>80 for item in revision.visual_items):
         raise ValueError('Slide regeneration returned text that does not fit the selected density modes')
+    if len({_phrase_key(revision.takeaway),_phrase_key(revision.balanced_message),_phrase_key(revision.message)}-{''})<3:
+        raise ValueError('Slide regeneration repeated text across density modes')
+    source=' '.join(c.text for c in selected)
+    unsupported=_directional_markers(visible)-_directional_markers(source)
+    if unsupported:raise ValueError('Slide regeneration changed comparison or optimization direction')
     invented=set(re.findall(r'\d+(?:[.,]\d+)?',visible))-source_numbers
     if invented:raise ValueError('Slide regeneration introduces numbers absent from source: '+', '.join(sorted(invented)))
     result=slide.model_copy(deep=True)
-    for field in ('title','message','support_points','takeaway','visual','archetype','visual_brief'):
+    for field in ('title','message','balanced_message','support_points','takeaway','visual_items','visual','archetype','visual_brief'):
         setattr(result,field,getattr(revision,field))
     return result
 
@@ -365,13 +594,29 @@ def _complete_excerpt(value,limit=105):
 
 def _semantic_lead(slide,variant):
     """Choose an authored complete thought for each density mode."""
-    if variant in {'A','B'}:
+    if variant=='A':
         candidates=[slide.takeaway,*slide.support_points,slide.message]
+        return _clean_text(next((value for value in candidates if value and value.strip()),slide.message))
+    if variant=='B':
+        candidates=[slide.balanced_message,slide.takeaway,slide.message]
         return _clean_text(next((value for value in candidates if value and value.strip()),slide.message))
     return _clean_text(slide.message)
 
 
 def _diagram_items(ps,claims):
+    def label(value):
+        value=_clean_text(value).rstrip(' .;:')
+        if len(value)<=52:return value
+        parts=[_clean_text(part).rstrip(' .;:') for part in re.split(r'[:;,.]|\s+[—–]\s+',value)]
+        candidate=next((part for part in parts if 12<=len(part)<=52),None)
+        if candidate:return candidate
+        words=value.split();chosen=[]
+        for word in words:
+            if chosen and len(' '.join(chosen+[word]))>52:break
+            chosen.append(word)
+        while chosen and chosen[-1].casefold() in {'и','в','на','для','с','к','по','из','от'}:chosen.pop()
+        return ' '.join(chosen) or value
+    if ps.visual_items:return [label(item) for item in ps.visual_items[:3] if item.strip()]
     query=set(re.findall(r'[\w+#<>]{4,}',(ps.title+' '+ps.message).lower()))
     message_parts=[x for x in re.split(r'\n+|(?<=[.!?;])\s+|\s+[—–]\s+',ps.message) if x.strip()]
     primary=([ps.title]+message_parts if ps.visual=='hierarchy' else message_parts)
@@ -404,7 +649,7 @@ def _diagram_items(ps,claims):
         return (-len(words&query),len(text))
     items=unique[:4] if len(unique)>=2 else sorted(unique,key=rank)[:4]
     if len(items)<2:items=[_complete_excerpt(ps.title),_complete_excerpt(ps.message)]
-    return items
+    return [label(item) for item in items]
 
 
 def _supporting_points(ps,claims,limit=3):
@@ -498,6 +743,8 @@ def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, j
             body_style=_style(style_body,design,p.background)
             supports=ps.support_points or _supporting_points(ps,claims,3)
             lead_text=_semantic_lead(ps,variant)
+            lead_key=_phrase_key(lead_text)
+            supports=[text for text in supports if _phrase_key(text) not in lead_key and not _near_duplicate(text,lead_text)]
             nodes=[]
             if is_cover or last:
                 title_size={'A':48,'B':42,'C':36}[variant];body_size={'A':24,'B':22,'C':18}[variant]
@@ -522,19 +769,21 @@ def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, j
                         vb=Box(x=.11,y=top+.27,w=content_right-.16,h=max(.25,.86-(top+.27)))
                     elif variant=='B':
                         lead=body_style.model_copy(deep=True);lead.size=_scale_size(design,20,22)
-                        left=.34 if branded_slide else .35
-                        nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=left,h=.23),style=lead,text=lead_text,claim_ids=ps.claim_ids))
+                        left=.36 if branded_slide else .40
+                        nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=left,h=.29),style=lead,text=lead_text,claim_ids=ps.claim_ids))
                         if supports:
                             support_style=body_style.model_copy(deep=True);support_style.size=_scale_size(design,18,18)
-                            nodes.append(Node(id=f'{ps.id}-support-1',kind='text',role='support',box=Box(x=.06,y=top+.29,w=left,h=.20),style=support_style,text=supports[0],claim_ids=ps.claim_ids))
-                        vb=Box(x=.46,y=top,w=content_right-.46,h=.50)
+                            nodes.append(Node(id=f'{ps.id}-support-1',kind='text',role='support',box=Box(x=.06,y=top+.32,w=left,h=.24),style=support_style,text=supports[0],claim_ids=ps.claim_ids))
+                        vb=Box(x=.50,y=top,w=content_right-.50,h=.50)
                     else:
                         lead=body_style.model_copy(deep=True);lead.size=_scale_size(design,18,18)
-                        nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=.45,h=.17),style=lead,text=lead_text,claim_ids=ps.claim_ids))
+                        nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=.46,h=.25),style=lead,text=lead_text,claim_ids=ps.claim_ids))
                         support_style=body_style.model_copy(deep=True);support_style.size=_scale_size(design,18,18)
-                        for idx,text in enumerate(supports[:2]):
-                            nodes.append(Node(id=f'{ps.id}-support-{idx+1}',kind='text',role='support',box=Box(x=.06,y=top+.22+idx*.17,w=.45,h=.14),style=support_style,text=text,claim_ids=ps.claim_ids))
-                        vb=Box(x=.57,y=top,w=.37,h=.47)
+                        visible_supports=supports[:2] if sum(map(len,supports[:2]))<=120 else supports[:1]
+                        support_h=.15 if len(visible_supports)>1 else .22
+                        for idx,text in enumerate(visible_supports):
+                            nodes.append(Node(id=f'{ps.id}-support-{idx+1}',kind='text',role='support',box=Box(x=.06,y=top+.29+idx*.18,w=.46,h=support_h),style=support_style,text=text,claim_ids=ps.claim_ids))
+                        vb=Box(x=.56,y=top,w=.38,h=.50)
                 else:
                     lead_w=content_right-.07
                     if variant=='A':
@@ -549,22 +798,25 @@ def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, j
                             for idx,text in enumerate(supports[:2]):
                                 x=.06+idx*(col_w+.05)
                                 nodes.append(Node(id=f'{ps.id}-support-accent-{idx+1}',kind='text',role='accent',box=Box(x=x,y=top+.26,w=.055,h=.009),style=Style(font=body_style.font,size=18,color=accent,fill=accent),text=''))
-                                nodes.append(Node(id=f'{ps.id}-support-{idx+1}',kind='text',role='support',box=Box(x=x,y=top+.30,w=col_w,h=.21),style=support_style,text=text,claim_ids=ps.claim_ids))
+                                nodes.append(Node(id=f'{ps.id}-support-{idx+1}',kind='text',role='support',box=Box(x=x,y=top+.30,w=col_w,h=.28),style=support_style,text=text,claim_ids=ps.claim_ids))
                     else:
                         lead=body_style.model_copy(deep=True);lead.size=_scale_size(design,18,18)
                         nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=lead_w,h=.15),style=lead,text=lead_text,claim_ids=ps.claim_ids))
                         support_style=body_style.model_copy(deep=True);support_style.size=_scale_size(design,18,18)
                         details=supports[:3] or ([ps.takeaway] if ps.takeaway else [])
-                        cols=max(1,len(details));col_w=(lead_w-.04*(cols-1))/cols
+                        cols=min(2,max(1,len(details)));col_w=(lead_w-.04*(cols-1))/cols
                         for idx,text in enumerate(details):
-                            x=.06+idx*(col_w+.04)
-                            nodes.append(Node(id=f'{ps.id}-support-accent-{idx+1}',kind='text',role='accent',box=Box(x=x,y=top+.19,w=.045,h=.008),style=Style(font=body_style.font,size=18,color=accent,fill=accent),text=''))
-                            nodes.append(Node(id=f'{ps.id}-support-{idx+1}',kind='text',role='support',box=Box(x=x,y=top+.22,w=col_w,h=.24),style=support_style,text=text,claim_ids=ps.claim_ids))
+                            if idx<2:
+                                x=.06+idx*(col_w+.04);y=top+.22;w=col_w;h=.22;accent_y=top+.19
+                            else:
+                                x=.06;y=top+.49;w=lead_w;h=.13;accent_y=top+.46
+                            nodes.append(Node(id=f'{ps.id}-support-accent-{idx+1}',kind='text',role='accent',box=Box(x=x,y=accent_y,w=.045,h=.008),style=Style(font=body_style.font,size=18,color=accent,fill=accent),text=''))
+                            nodes.append(Node(id=f'{ps.id}-support-{idx+1}',kind='text',role='support',box=Box(x=x,y=y,w=w,h=h),style=support_style,text=text,claim_ids=ps.claim_ids))
             if visual!='none' and not is_cover and not last:
                 kind='diagram' if visual in {'sequence','list','hierarchy'} else visual
-                items=_diagram_items(ps,claims)[:{'A':2,'B':3,'C':4}[variant]]
+                items=_diagram_items(ps,claims)[:{'A':2,'B':3,'C':3}[variant]]
                 data=datasets[ps.dataset_id].model_dump() if ps.dataset_id else assets[ps.asset_id].model_dump() if ps.asset_id else {'layout':visual,'items':items,'accent':accent,'surface':surface}
-                visualstyle=_style(style_body,design,p.background);visualstyle.size=_scale_size(design,18,18)
+                visualstyle=_style(style_body,design,p.background);visualstyle.size=_scale_size(design,20,22)
                 visualstyle.fill=surface
                 nodes.append(Node(id=f'{ps.id}-visual',kind=kind,role='visual',box=vb,style=visualstyle,data=data,claim_ids=ps.claim_ids if kind=='diagram' else []))
             for node in nodes:

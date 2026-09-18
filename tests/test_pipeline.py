@@ -3,7 +3,7 @@ import shutil
 import pytest
 from pptx import Presentation
 from vktech.template import import_template
-from vktech.planning import NeedsInput,build_scenes,validate_plan,plan_with_model,normalize_plan,planning_claims,enrich_plan
+from vktech.planning import NeedsInput,build_scenes,validate_plan,plan_with_model,normalize_plan,planning_claims,enrich_plan,fit_semantic_variants
 from vktech.export import export_pptx,export_html
 from vktech.opc import Package
 from vktech.audit import audit_scene,repair_scene,contrast
@@ -75,11 +75,60 @@ def test_plan_rejects_mechanically_truncated_text(content,plan):
     with pytest.raises(ValueError,match='truncated'):validate_plan(broken,content,12)
 
 
+def test_plan_rejects_density_order_that_does_not_add_detail(content,plan):
+    broken=plan.model_copy(deep=True);slide=broken.slides[0]
+    slide.takeaway='Краткая самостоятельная мысль.'
+    slide.balanced_message='Сбалансированная самостоятельная мысль с контекстом.'
+    slide.message='Подробная мысль.'
+    with pytest.raises(ValueError,match='increase semantic detail'):validate_plan(broken,content,12)
+
+
+def test_plan_rejects_unfinished_sentence_without_ellipsis(content,plan):
+    broken=plan.model_copy(deep=True);broken.slides[0].message='Мысль оборвалась посреди последнего'
+    with pytest.raises(ValueError,match='unfinished sentence'):validate_plan(broken,content,12)
+
+
+def test_plan_rejects_near_duplicate_main_ideas(content,plan):
+    broken=plan.model_copy(deep=True)
+    broken.slides[1].message='Один и тот же параллельный алгоритм использует общую память и критический путь для вычислений.'
+    broken.slides[2].message='Тот же параллельный алгоритм использует общую память и критический путь при вычислении.'
+    with pytest.raises(ValueError,match='near-duplicate main ideas'):validate_plan(broken,content,12)
+
+
 def test_plan_rejects_text_that_cannot_fit_density_modes(content,plan):
     broken=plan.model_copy(deep=True);broken.slides[0].message='Очень длинная главная мысль, которая остаётся законченным предложением, но значительно превышает безопасную длину для подробной компоновки и поэтому должна быть семантически переформулирована моделью целиком, без обрезания отдельных слов, фактов, чисел, оговорок и смысловых связей.'
     with pytest.raises(ValueError,match='220 characters'):validate_plan(broken,content,12)
     broken=plan.model_copy(deep=True);broken.slides[0].takeaway='Слишком длинный вывод сохраняет грамматическую завершённость, однако уже не подходит для крупного режима и поэтому должен быть полностью переформулирован моделью без механического удаления слов.'
     with pytest.raises(ValueError,match='130 characters'):validate_plan(broken,content,12)
+
+
+def test_density_fit_composes_whole_authored_sentences_without_clipping(plan):
+    draft=plan.model_copy(deep=True);slide=draft.slides[0]
+    slide.takeaway='Короткая главная мысль сохраняется полностью.'
+    slide.balanced_message='Сбалансированная формулировка сохраняет основную мысль и необходимый контекст.'
+    slide.message='Очень длинный подробный текст '+('с дополнительным контекстом '*12)+'и не должен быть обрезан.'
+    slide.support_points=['Подтверждающий факт остаётся отдельным законченным предложением.']
+    fitted=fit_semantic_variants(draft).slides[0]
+    assert fitted.takeaway.endswith('.') and fitted.balanced_message.endswith('.') and fitted.message.endswith('.')
+    assert len(fitted.message)<=220 and '…' not in fitted.message and '...' not in fitted.message
+    assert fitted.message!=fitted.takeaway and fitted.message!=fitted.balanced_message
+    assert len(fitted.takeaway)<len(fitted.balanced_message)<len(fitted.message)
+
+
+def test_density_fit_removes_repeated_sentences_and_repairs_pdf_formula(plan):
+    draft=plan.model_copy(deep=True);slide=draft.slides[0]
+    slide.takeaway='Время T! ограничено работой.'
+    slide.balanced_message='Время T! ограничено работой. Дополнительный контекст сохраняется.'
+    slide.message='Время T! ограничено работой. Время T! ограничено работой. Дополнительный контекст сохраняется. Подробность объясняет границу.'
+    fitted=fit_semantic_variants(normalize_plan(draft)).slides[0]
+    assert 'T!' not in fitted.message and 'T_P' in fitted.message
+    assert fitted.message.count('Время T_P ограничено работой.')==1
+    assert len(fitted.takeaway)<len(fitted.balanced_message)<len(fitted.message)
+
+
+def test_plan_rejects_invented_optimization_direction(content,plan):
+    broken=plan.model_copy(deep=True);broken.slides[0].message='Сначала необходимо максимизировать показатель, а затем продолжить вычисление.'
+    with pytest.raises(ValueError,match='optimization direction'):validate_plan(broken,content,12)
 
 
 def test_incomplete_optional_visual_intent_is_removed(plan):
@@ -123,14 +172,41 @@ def test_variants_have_distinct_density_and_type_scale(template_bytes,content,pl
 def test_variants_use_complete_semantic_text_without_ellipsis(template_bytes,content,plan):
     structured=enrich_plan(plan,content);target=structured.slides[1]
     target.message='Полная главная мысль объясняет факт целиком. Второе предложение добавляет контекст.'
+    target.balanced_message='Сбалансированная версия объясняет факт и сохраняет контекст.'
     target.takeaway='Короткая версия сохраняет основную мысль целиком.'
     target.support_points=['Первый законченный подтверждающий тезис.','Второй законченный подтверждающий тезис.']
     scenes=build_scenes(import_template(template_bytes),content,structured,'semantic')
     leads=[next(node.text for node in scene.slides[1].nodes if node.role=='body') for scene in scenes]
     assert leads[0]==target.takeaway
-    assert leads[1]==target.takeaway
+    assert leads[1]==target.balanced_message
     assert leads[2]==target.message
+    assert len(set(leads))==3
     assert all('…' not in lead and '...' not in lead for lead in leads)
+
+
+def test_diagram_uses_short_model_labels_and_readable_type(template_bytes,content,plan):
+    structured=enrich_plan(plan,content);target=structured.slides[3]
+    target.visual='sequence';target.visual_items=['Получить независимые задачи','Выполнить задачи параллельно','Объединить результаты']
+    scenes=build_scenes(import_template(template_bytes),content,structured,'diagram-labels')
+    for scene in scenes:
+        node=next(node for node in scene.slides[3].nodes if node.kind=='diagram')
+        limit=2 if scene.variant=='A' else 3
+        assert node.data['items']==target.visual_items[:limit]
+        assert node.style.size>=20
+
+
+def test_narrow_sequence_uses_vertical_cards_and_shortens_long_labels(template_bytes,content,plan,tmp_path):
+    structured=enrich_plan(plan,content);target=structured.slides[3]
+    target.visual='sequence';target.visual_items=['Очень длинная подпись этапа, которая содержит дополнительное пояснение и не должна выходить из карточки','Второй этап','Третий этап']
+    design=import_template(template_bytes);scene=build_scenes(design,content,structured,'vertical-diagram')[1]
+    node=next(node for node in scene.slides[3].nodes if node.kind=='diagram')
+    assert max(map(len,node.data['items']))<=52
+    output=tmp_path/'vertical.pptx';export_pptx(template_bytes,design,scene,output)
+    slide=Presentation(output).slides[3]
+    cards=[shape for shape in slide.shapes if shape.name.startswith(target.id+'-visual-card-')]
+    assert len(cards)==3
+    assert len({shape.left for shape in cards})==1
+    assert [shape.top for shape in cards]==sorted(shape.top for shape in cards)
 
 
 def test_planner_retries_with_missing_claim_feedback(content,plan):
@@ -174,7 +250,8 @@ def test_planner_does_not_retry_a_model_request_for_missing_input(content):
 
 def test_long_deck_is_planned_in_source_ordered_batches(content):
     from vktech.contracts import Claim,ContentIR,PlanSlide,PresentationPlan
-    claims=[Claim(id=f'claim-long-{index}',text=f'Уникальный учебный факт {index}',source=f'source-{index}',required=False) for index in range(18)]
+    topics=['матрица','редукция','барьер','планировщик','память','поток','граф','вершина','ребро','очередь','синхронизация','локальность','ассоциативность','коммутативность','пропускная способность','задержка','масштабируемость','зависимость']
+    claims=[Claim(id=f'claim-long-{index}',text=f'Учебная тема: {topic}.',source=f'source-{index}',required=False) for index,topic in enumerate(topics)]
     long_content=ContentIR(id='long',title='long',claims=claims)
     class Gateway:
         def __init__(self):self.payloads=[]
@@ -185,7 +262,8 @@ def test_long_deck_is_planned_in_source_ordered_batches(content):
             for index,assignment in enumerate(payload['slide_assignments']):
                 claim=available[assignment['claim_ids'][0]]
                 marker=chr(1040+(segment-1)*6+index)
-                slides.append(PlanSlide(id=f'local-{index}',title=f'Уникальная тема {marker}',message=f'Отдельная главная мысль {marker}',claim_ids=assignment['claim_ids']))
+                topic=claim['text'].removeprefix('Учебная тема: ').rstrip('.')
+                slides.append(PlanSlide(id=f'local-{index}',title=f'{topic}: уникальная тема {marker}',takeaway=f'{topic} определяет тему {marker}.',balanced_message=f'{topic} определяет тему {marker} и её основной механизм.',message=f'{topic} определяет тему {marker}, её основной механизм и практическое следствие.',claim_ids=assignment['claim_ids']))
             return PresentationPlan(slides=slides)
     gateway=Gateway();request=GenerateRequest(template_id='template',content_id='content',brief='test',slide_count=18)
     result=plan_with_model(gateway,long_content,request)

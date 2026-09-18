@@ -117,6 +117,8 @@ class PlanSlide(Contract):
     archetype: Literal["cover", "divider", "explanation", "comparison", "process", "example", "formula", "exercise", "summary", "illustration"] = "explanation"
     support_points: list[str] = Field(default_factory=list, max_length=3)
     takeaway: str = Field(default="", max_length=180)
+    balanced_message: str = Field(default="", max_length=240)
+    visual_items: list[str] = Field(default_factory=list, max_length=3)
     visual_brief: str = Field(default="", max_length=300)
 
 
@@ -234,6 +236,8 @@ class SlideRevision(Contract):
     message: str = Field(min_length=1, max_length=360)
     support_points: list[str] = Field(default_factory=list, max_length=3)
     takeaway: str = Field(default="", max_length=180)
+    balanced_message: str = Field(default="", max_length=240)
+    visual_items: list[str] = Field(default_factory=list, max_length=3)
     visual: Literal["none", "sequence", "list", "hierarchy"] = "none"
     archetype: Literal["divider", "explanation", "comparison", "process", "example", "formula", "exercise", "summary", "illustration"] = "explanation"
     visual_brief: str = Field(default="", max_length=300)

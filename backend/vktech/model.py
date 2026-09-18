@@ -63,6 +63,36 @@ def response_schema(role: str, payload: dict, schema: type[BaseModel]) -> dict:
         if isinstance(count, int) and count > 0 and slides.get("type") == "array":
             slides["minItems"] = count
             slides["maxItems"] = count
+        plan_slide=result.get('$defs',{}).get('PlanSlide',{})
+        properties=plan_slide.get('properties',{})
+        for name,grammar_limit in {'message':260,'balanced_message':200,'takeaway':150}.items():
+            if name in properties:
+                # The grammar boundary intentionally exceeds the layout-safe
+                # validator boundary. If prose reaches this outer limit, the
+                # planner must rewrite it shorter instead of accepting a cut at
+                # the exact length rendered on the slide.
+                properties[name]['maxLength']=grammar_limit
+                properties[name]['pattern']=r'.*[.!?)]$'
+        if 'support_points' in properties:
+            properties['support_points'].setdefault('items',{})['maxLength']=130
+            properties['support_points']['items']['pattern']=r'.*[.!?)]$'
+        if 'visual_items' in properties:properties['visual_items'].setdefault('items',{})['maxLength']=100
+        required=plan_slide.setdefault('required',[])
+        for name in ('takeaway','balanced_message','support_points','visual_items'):
+            if name not in required:required.append(name)
+    elif role == 'regenerate_slide':
+        properties=result.get('properties',{})
+        for name,grammar_limit in {'message':260,'balanced_message':200,'takeaway':150}.items():
+            if name in properties:
+                properties[name]['maxLength']=grammar_limit
+                properties[name]['pattern']=r'.*[.!?)]$'
+        if 'support_points' in properties:
+            properties['support_points'].setdefault('items',{})['maxLength']=130
+            properties['support_points']['items']['pattern']=r'.*[.!?)]$'
+        if 'visual_items' in properties:properties['visual_items'].setdefault('items',{})['maxLength']=100
+        required=result.setdefault('required',[])
+        for name in ('takeaway','balanced_message','support_points','visual_items'):
+            if name not in required:required.append(name)
     return result
 
 
