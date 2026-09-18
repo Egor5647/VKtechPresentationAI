@@ -4,7 +4,7 @@ import pytest
 from pptx import Presentation
 from PIL import Image
 from vktech.template import import_template
-from vktech.planning import NeedsInput,build_scenes,validate_plan,plan_with_model,normalize_plan,planning_claims,enrich_plan,fit_semantic_variants,assign_visual_strategies,protect_text_from_template_decor
+from vktech.planning import NeedsInput,build_scenes,validate_plan,plan_with_model,normalize_plan,planning_claims,enrich_plan,fit_semantic_variants,assign_visual_strategies,protect_text_from_template_decor,_diagram_layout
 from vktech.export import export_pptx,export_html,_card_font_size
 from vktech.opc import Package
 from vktech.audit import audit_scene,audit_rendered_deck,repair_scene,contrast
@@ -170,6 +170,28 @@ def test_visual_strategy_uses_image_for_real_world_model_limit(content,plan):
     target.archetype='explanation'
     selected=assign_visual_strategies(draft,content,True).slides[4]
     assert selected.visual_strategy=='generated_image'
+
+
+def test_visual_strategy_uses_image_for_conceptual_transition(content,plan):
+    draft=plan.model_copy(deep=True);target=draft.slides[1]
+    target.title='От конкурентного кода к абстрактным параллельным алгоритмам'
+    target.message='Абстрактный алгоритм отделяет полезный параллелизм от деталей потоков.'
+    target.visual_brief='Переход от сложного кода к ясной модели.';target.archetype='process'
+    selected=assign_visual_strategies(draft,content,True).slides[1]
+    assert selected.visual_strategy=='generated_image'
+
+
+@pytest.mark.parametrize(('title','expected'),[
+    ('Бинарная редукция в EREW','reduction_tree'),
+    ('Fork-Join и DAG вычислений','fork_join'),
+    ('Work и Span: критический путь','critical_path'),
+    ('Greedy scheduler: формула верхней границы','formula_focus'),
+    ('Level-by-level scheduler','scheduler'),
+    ('Broadcast, reduction и планировщики','comparison'),
+])
+def test_semantic_diagram_layouts(plan,title,expected):
+    slide=plan.slides[3].model_copy(deep=True);slide.title=title
+    assert _diagram_layout(slide)==expected
 
 
 def test_render_audit_detects_repeated_adjacent_composition(template_bytes,content,plan,tmp_path):

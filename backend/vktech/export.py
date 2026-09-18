@@ -67,7 +67,82 @@ def _diagram(out,node,xywh):
     def connector(x1,y1,x2,y2,index):
         line=out.shapes.add_connector(MSO_CONNECTOR.STRAIGHT,x1,y1,x2,y2)
         line.name=f'{node.id}-connector-{index}';line.line.color.rgb=RGBColor.from_string(accent);line.line.width=Pt(2)
-    if layout=='sequence':
+    def dot(cx,cy,size,index,highlight=False):
+        shape=out.shapes.add_shape(MSO_SHAPE.OVAL,cx-size//2,cy-size//2,size,size)
+        shape.name=f'{node.id}-node-{index}';shape.fill.solid();shape.fill.fore_color.rgb=RGBColor.from_string(accent if highlight else surface)
+        shape.line.color.rgb=RGBColor.from_string(accent);shape.line.width=Pt(1.4)
+    if layout=='layers':
+        count=len(items);ch=(h-vgap*(count-1))//count
+        for i,item in enumerate(items):
+            inset=round(i*w*.045);_card(out,node,x+inset,y+i*(ch+vgap),w-2*inset,ch,item,f'{node.id}-layer-{i+1}',accent if i==0 else surface,white if i==0 else dark,i==0)
+    elif layout=='comparison':
+        top_count=min(2,len(items));bottom=items[2:3]
+        card_h=round(h*(.62 if bottom else .88));cw=(w-gap)//max(1,top_count)
+        for i,item in enumerate(items[:top_count]):
+            _card(out,node,x+i*(cw+gap),y,cw,card_h,item,f'{node.id}-compare-{i+1}',accent if i==0 else surface,white if i==0 else dark,i==0)
+        if bottom:_card(out,node,x+round(w*.08),y+card_h+vgap,w-round(w*.16),h-card_h-vgap,bottom[0],f'{node.id}-compare-3',surface,dark)
+    elif layout=='fork_join':
+        top_h=round(h*.22);bottom_h=top_h;middle_y=y+round(h*.38);middle_h=round(h*.22)
+        _card(out,node,x+round(w*.24),y,round(w*.52),top_h,items[0],f'{node.id}-fork',accent,white,True)
+        branch_count=3
+        for i in range(branch_count):
+            label=items[1] if len(items)>1 and i==1 else ''
+            branch_w=round(w*(.32 if label else .16))
+            bx=x+round(w*((.07,.34,.77)[i]));connector(x+w//2,y+top_h,bx+branch_w//2,middle_y,i+1)
+            if label:_card(out,node,bx,middle_y,branch_w,middle_h,label,f'{node.id}-branch-{i+1}',surface,dark)
+            else:
+                sh=out.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,bx,middle_y,branch_w,middle_h);sh.name=f'{node.id}-branch-{i+1}';sh.fill.solid();sh.fill.fore_color.rgb=RGBColor.from_string(surface);sh.line.color.rgb=RGBColor.from_string(accent)
+            connector(bx+branch_w//2,middle_y+middle_h,x+w//2,y+h-bottom_h,i+10)
+        _card(out,node,x+round(w*.24),y+h-bottom_h,round(w*.52),bottom_h,items[-1],f'{node.id}-join',accent,white,True)
+    elif layout=='reduction_tree':
+        levels=(4,2,1);ys=(y+round(h*.78),y+round(h*.42),y+round(h*.08));size=max(Pt(18),min(round(w*.10),round(h*.14)))
+        level_centers=[]
+        for row,count in enumerate(levels):
+            centers=[x+round((i+1)*w/(count+1)) for i in range(count)];level_centers.append(centers)
+            for i,cx in enumerate(centers):dot(cx,ys[row],size,row*10+i,row==2)
+        for child_row in (0,1):
+            for i,cx in enumerate(level_centers[child_row]):
+                parent=level_centers[child_row+1][i//2];connector(cx,ys[child_row]-size//2,parent,ys[child_row+1]+size//2,30+child_row*10+i)
+        label_h=round(h*.16)
+        for i,item in enumerate(items[:3]):
+            _card(out,node,x+round(w*.03),y+round(h*(.82-i*.35)),round(w*.40),label_h,item,f'{node.id}-level-label-{i+1}',accent if i==2 else surface,white if i==2 else dark,i==2)
+    elif layout=='critical_path':
+        positions=[(.10,.72),(.30,.50),(.50,.68),(.70,.35),(.90,.18)];size=max(Pt(18),min(round(w*.10),round(h*.14)))
+        for i,((ax,ay),(bx,by)) in enumerate(zip(positions,positions[1:]),1):connector(x+round(ax*w),y+round(ay*h),x+round(bx*w),y+round(by*h),i)
+        # A secondary branch makes the critical path visually explicit.
+        connector(x+round(.30*w),y+round(.50*h),x+round(.52*w),y+round(.28*h),20);connector(x+round(.52*w),y+round(.28*h),x+round(.70*w),y+round(.35*h),21)
+        dot(x+round(.52*w),y+round(.28*h),size,20,False)
+        for i,(px,py) in enumerate(positions):dot(x+round(px*w),y+round(py*h),size,i,True)
+        label_h=round(h*.27)
+        for i,item in enumerate(items[:3]):
+            if i==2:lx=x+round(.62*w);ly=y+round(.02*h);label_w=round(.36*w)
+            else:lx=x+round((.01+i*.43)*w);ly=y+round(.72*h);label_w=round(.40*w)
+            _card(out,node,lx,ly,label_w,label_h,item,f'{node.id}-path-label-{i+1}',accent if i==2 else surface,white if i==2 else dark,i==2)
+    elif layout=='memory_access':
+        processor_w=round(w*.30);memory_x=x+round(w*.54);memory_w=w-round(w*.56);card_h=round(h*.22)
+        for i in range(3):
+            py=y+i*round(h*.31);source_label=items[i] if i<len(items)-1 else ''
+            modes=[mode for mode in ('EREW','CREW','CRCW') if mode.casefold() in source_label.casefold()]
+            label='/'.join(modes) or 'Процессор'
+            _card(out,node,x,py,processor_w,card_h,label,f'{node.id}-processor-{i+1}',accent if i==0 else surface,white if i==0 else dark,i==0)
+            connector(x+processor_w,py+card_h//2,memory_x,y+h//2,i+1)
+        memory_label=items[-1] if len(items)>1 else 'Общая память'
+        _card(out,node,memory_x,y+round(h*.18),memory_w,round(h*.64),memory_label,f'{node.id}-memory',surface,dark,True)
+    elif layout=='formula_focus':
+        main_w=round(w*.52);main_h=round(h*.62);main_y=y+(h-main_h)//2
+        _card(out,node,x,main_y,main_w,main_h,items[0],f'{node.id}-formula',accent,white,True)
+        side_x=x+main_w+gap;side_w=w-main_w-gap;side_h=(h-vgap)//2
+        for i,item in enumerate(items[1:3]):
+            _card(out,node,side_x,y+i*(side_h+vgap),side_w,side_h,item,f'{node.id}-formula-note-{i+1}',surface,dark)
+    elif layout=='scheduler':
+        queue_w=round(w*.40);queue_h=round(h*.24)
+        _card(out,node,x,y+round(h*.06),queue_w,queue_h,items[0],f'{node.id}-queue',accent,white,True)
+        processor_x=x+round(w*.56);processor_w=w-round(w*.58);processor_h=round(h*.22)
+        for i in range(3):
+            py=y+i*round(h*.32);label=items[i+1] if i+1<len(items) else 'Процессор'
+            connector(x+queue_w,y+round(h*.18),processor_x,py+processor_h//2,i+1)
+            _card(out,node,processor_x,py,processor_w,processor_h,label,f'{node.id}-worker-{i+1}',surface,dark)
+    elif layout=='sequence':
         count=len(items)
         if count>=3 and w/h<1.6:
             ch=(h-vgap*(count-1))//count;cx=x
@@ -296,7 +371,7 @@ def export_html(scene,path,backgrounds=None):
             nodes.append(f'<div class="node {n.kind}" data-element-id="{html.escape(n.id,quote=True)}" style="{style}">{body}</div>')
         slides.append(f'<section class="slide" aria-label="{html.escape(slide.title,quote=True)}" style="background:#{slide.background}">{bg}{"".join(nodes)}</section>')
     doc='''<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Презентация</title><style>
-body{margin:0;background:#d9dce3;font-family:Arial}main{max-width:1400px;margin:auto}.slide{position:relative;aspect-ratio:16/9;container-type:inline-size;margin:24px 0;overflow:hidden}.decor{position:absolute;width:100%;height:100%;inset:0}.node{position:absolute;box-sizing:border-box;line-height:1.2;overflow:visible}.node img,.node svg{width:100%;height:100%;object-fit:contain}.node table{border-collapse:collapse;width:100%;height:100%;font-size:.7em}.node td,.node th{padding:.2em;border:1px solid currentColor}.diagram{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;height:100%;gap:4%;font-size:.8em}.diagram li{background:#e8eef6;padding:.4em;border-radius:8px;flex:1}.diagram.sequence{flex-direction:row}.diagram.sequence.vertical{flex-direction:column}.controls{position:fixed;right:20px;bottom:20px;z-index:20;background:#172438;color:white;border:0;border-radius:8px;padding:10px 14px}.controls button{color:white;background:transparent;border:0;font-size:18px}.controls span{padding:0 8px}@media print{body{background:white}.slide{margin:0;break-after:page}.controls{display:none}main{max-width:none}}@supports not (font-size:1cqw){.node{font-size:18px!important}}
+body{margin:0;background:#d9dce3;font-family:Arial}main{max-width:1400px;margin:auto}.slide{position:relative;aspect-ratio:16/9;container-type:inline-size;margin:24px 0;overflow:hidden}.decor{position:absolute;width:100%;height:100%;inset:0}.node{position:absolute;box-sizing:border-box;line-height:1.2;overflow:visible}.node img,.node svg{width:100%;height:100%;object-fit:contain}.node table{border-collapse:collapse;width:100%;height:100%;font-size:.7em}.node td,.node th{padding:.2em;border:1px solid currentColor}.diagram{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;height:100%;gap:4%;font-size:.8em}.diagram li{background:#e8eef6;padding:.4em;border-radius:8px;flex:1}.diagram.sequence{flex-direction:row}.diagram.sequence.vertical,.diagram.layers{flex-direction:column}.diagram.comparison{display:grid;grid-template-columns:1fr 1fr;grid-auto-rows:1fr}.diagram.fork_join,.diagram.reduction_tree,.diagram.critical_path{justify-content:space-between;align-items:center}.diagram.fork_join li,.diagram.reduction_tree li,.diagram.critical_path li{width:70%}.diagram.memory_access,.diagram.scheduler,.diagram.formula_focus{display:grid;grid-template-columns:1fr 1fr}.controls{position:fixed;right:20px;bottom:20px;z-index:20;background:#172438;color:white;border:0;border-radius:8px;padding:10px 14px}.controls button{color:white;background:transparent;border:0;font-size:18px}.controls span{padding:0 8px}@media print{body{background:white}.slide{margin:0;break-after:page}.controls{display:none}main{max-width:none}}@supports not (font-size:1cqw){.node{font-size:18px!important}}
 </style><main>'''+''.join(slides)+'''</main><nav class="controls" aria-label="Навигация"><button type="button" data-dir="-1" aria-label="Предыдущий слайд">←</button><span></span><button type="button" data-dir="1" aria-label="Следующий слайд">→</button></nav><script>
 const slides=[...document.querySelectorAll('.slide')],label=document.querySelector('.controls span');let index=0;
 function show(i){index=Math.max(0,Math.min(slides.length-1,i));slides.forEach((s,j)=>s.hidden=j!==index);label.textContent=`${index+1} / ${slides.length}`;slides[index].focus?.()}

@@ -27,6 +27,8 @@ def workflow_manifest():
 def illustration_prompt(slide):
     text=(slide.title+' '+slide.message).lower()
     suffix='Isometric editorial illustration, VK Education palette with vivid blue, cyan and magenta accents, soft depth, clean pale background, wide 16:9 composition, no words, no letters, no numbers, no logo'
+    if 'конкурент' in text and ('абстракт' in text or 'параллел' in text):return 'A tangled cluster of low-level concurrent threads on the left transforms into a clean abstract task graph with parallel branches on the right. '+suffix
+    if 'реализац' in text or 'contention' in text or 'overhead' in text:return 'A shared-memory parallel computer surrounded by data-transfer paths, waiting queues and resource bottlenecks, clear contrast between ideal model and physical system. '+suffix
     if 'вывод' in text or 'итог' in text:return 'A coherent overview of parallel computing: processors, shared memory, task graph and critical path assembled into one balanced system. '+suffix
     if 'scheduler' in text or 'планиров' in text:return 'Several computing nodes take ready tasks from a shared queue, clear visual flow from queue to processors. '+suffix
     if 'dag' in text or 'граф' in text:return 'A directed acyclic graph made of luminous task nodes and dependency arrows, one critical path is emphasized. '+suffix
@@ -248,7 +250,18 @@ class Pipeline:
         content=ContentIR.model_validate_json(artifact_path(parentresult['artifacts']['content']).read_bytes())
         content,replacements=recolor_generated_assets(content,source_design,palette,folder)
         plan=PresentationPlan.model_validate_json(artifact_path(parentresult['artifacts']['plan']).read_bytes())
-        source_variants=parentresult.get('artifacts',{}).get('source_variants') or {variant:parentresult['variants'][variant]['scene'] for variant in ('A','B','C')}
+        # A recompose job may carry old source_variants only to preserve palette
+        # provenance.  While the deck is still in its source palette, the
+        # parent's current variants are the authoritative geometry.  Once a
+        # custom palette is active, reuse the saved source variants so repeated
+        # colour changes do not accumulate hue shifts.
+        source_palette=parentresult.get('source_palette')
+        current_palette=parentresult.get('palette')
+        source_variants=(
+            {variant:parentresult['variants'][variant]['scene'] for variant in ('A','B','C')}
+            if source_palette and current_palette==source_palette
+            else parentresult.get('artifacts',{}).get('source_variants')
+        ) or {variant:parentresult['variants'][variant]['scene'] for variant in ('A','B','C')}
         source_scenes={variant:SceneIR.model_validate_json(artifact_path(path).read_bytes()) for variant,path in source_variants.items()}
         scenes=[protect_text_from_template_decor(replace_scene_asset_paths(recolor_scene(source_scenes[variant],source_design,palette),replacements),design) for variant in ('A','B','C')]
         used_colors=[]

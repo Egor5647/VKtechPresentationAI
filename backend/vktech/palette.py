@@ -82,13 +82,15 @@ def recolor_scene(scene: SceneIR,design: DesignIR,palette: PaletteSpec) -> Scene
         for node in slide.nodes:
             if node.style.fill:node.style.fill=map_color(node.style.fill,design,palette)
             if node.role=='accent' and not node.text.strip():
-                node.style.color=node.style.fill=palette.accent
+                marker=palette.accent if contrast(palette.accent,slide.background)>=3 else palette.text_on_accent
+                node.style.color=node.style.fill=marker
             elif node.kind=='text':
                 background=node.style.fill or slide.background
                 node.style.color=readable_text(background,palette,node.style.size>=24 or node.style.bold)
             else:node.style.color=map_color(node.style.color,design,palette)
             if node.kind in {'diagram','smartart'}:
-                node.data['accent']=palette.accent;node.data['surface']=palette.surface
+                node.data['accent']=palette.accent if contrast(palette.accent,slide.background)>=3 else palette.text_on_accent
+                node.data['surface']=palette.surface
     result.version+=1
     return result
 

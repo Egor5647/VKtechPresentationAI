@@ -296,7 +296,7 @@ def assign_visual_strategies(plan: PresentationPlan,content: ContentIR,allow_gen
     """Choose the visual medium from slide semantics instead of a fixed image quota."""
     result=plan.model_copy(deep=True);last=len(result.slides)-1
     image_words=re.compile(r'сценар|ситуац|пользоват|клиент|команд|человек|продукт|интерфейс|экосистем|инфраструктур|реальн\w* систем|практическ\w* контекст|concurrency.+parallelism',re.I)
-    formula_words=re.compile(r'формул|доказ|теорем|границ|оценк|[≤≥=]|θ\s*\(|\bo\s*\(',re.I)
+    formula_words=re.compile(r'формул|доказ|теорем|границ|[≤≥=]|θ\s*\(|\bo\s*\(',re.I)
     hierarchy_words=re.compile(r'\bdag\b|граф|зависим|иерарх|архитектур',re.I)
     sequence_words=re.compile(r'этап|алгоритм|процесс|fork.?join|редукц|scheduler|планиров|broadcast|parallel for|цикл',re.I)
     comparison_words=re.compile(r'сравн|различ|режим|\bversus\b|\bvs\b|erew.+crew|crew.+crcw',re.I)
@@ -307,7 +307,7 @@ def assign_visual_strategies(plan: PresentationPlan,content: ContentIR,allow_gen
             slide.visual_strategy='table' if slide.visual=='table' else 'chart';slide.visual_score=1;slide.visual_reason='Числовые данные точнее передаются нативной диаграммой или таблицей.';continue
         if slide.asset_id:
             slide.visual='image';slide.visual_strategy='source_image';slide.visual_score=1;slide.visual_reason='В материалах есть связанное исходное изображение.';continue
-        if slide.role in {'cover','divider'} or index==last:
+        if slide.role in {'cover','divider'} or index in {0,last}:
             slide.visual='none';slide.visual_strategy='none';slide.visual_score=.95;slide.visual_reason='Оформление шаблона уже выполняет визуальную функцию этого слайда.';continue
         score=.18
         if slide.archetype=='illustration':score+=.55
@@ -345,12 +345,12 @@ def _archetype(slide,index=0,count=1):
     if slide.role=='cover' or index==0:return 'cover'
     if slide.role=='divider':return 'divider'
     if index==count-1 or re.search(r'вывод|итог|заключен|резюме',text):return 'summary'
-    if re.search(r'задач|упражнен|самопровер|домашн',text):return 'exercise'
+    if re.search(r'упражнен|самопровер|домашн|(?:^|[.!?]\s+)задач[аи]\s|решите|выполните задание',text):return 'exercise'
     if slide.visual=='image':return 'illustration'
-    if re.search(r'формул|теорем|оценк|границ|θ\s*\(|o\s*\(',text,re.I):return 'formula'
+    if re.search(r'формул|теорем|доказ|границ|θ\s*\(|o\s*\(|[≤≥=]',text,re.I):return 'formula'
     if re.search(r'пример|case|сценари',text):return 'example'
-    if slide.visual=='sequence' or re.search(r'этап|алгоритм|процесс|порядок|scheduler',text):return 'process'
     if slide.visual=='list' or re.search(r'различ|сравн|versus| vs\b|режим',text):return 'comparison'
+    if slide.visual=='sequence' or re.search(r'этап|алгоритм|процесс|порядок|scheduler|планиров',text):return 'process'
     return 'explanation'
 
 
@@ -754,6 +754,23 @@ def _diagram_items(ps,claims):
     return [label(item) for item in items]
 
 
+def _diagram_layout(ps) -> str:
+    """Select a semantic diagram grammar instead of a generic card stack."""
+    title=ps.title.lower();text=' '.join((ps.title,ps.message,ps.visual_brief)).lower()
+    groups=sum(bool(re.search(pattern,title)) for pattern in (r'broadcast',r'редукц|reduction',r'scheduler|планиров'))
+    if groups>=2:return 'comparison'
+    if re.search(r'редукц|reduction|бинарн\w* дерев',title):return 'reduction_tree'
+    if re.search(r'erew|crew|crcw|режим\w* доступ|set\s*\(',title):return 'memory_access'
+    if re.search(r'fork.?join|разветв\w*.*объедин',title) and 'broadcast' not in title:return 'fork_join'
+    if re.search(r'work\s+и\s+span|critical path|критическ\w* путь|2-аппроксимац',title):return 'critical_path'
+    if re.search(r'формул|неравен|верхн\w* границ|нижн\w* границ',title):return 'formula_focus'
+    if re.search(r'scheduler|планиров|work stealing|очеред',title):return 'scheduler'
+    if re.search(r'разделен\w* сло|три слоя|уровн\w* абстракц',text):return 'layers'
+    if ps.archetype=='comparison' or re.search(r'сравн|различ|trade.?off|ограничен',title):return 'comparison'
+    if ps.archetype=='process' or ps.visual=='sequence':return 'sequence'
+    return ps.visual
+
+
 def _supporting_points(ps,claims,limit=3):
     """Select concise source-backed details which add to, rather than repeat, the lead."""
     message_words=set(re.findall(r'[\w+#<>]{4,}',ps.message.lower()))
@@ -849,7 +866,7 @@ def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, j
             last=si==len(plan.slides)-1
             if (is_cover or last) and dark:
                 p=dark[(si+vi)%len(dark)]
-            elif variant=='A' and dark and (ps.role=='divider' or (si%5==2 and visual=='none')):
+            elif variant=='A' and dark and (ps.role=='divider' or si%6==4):
                 # The concise mode doubles as an editorial emphasis layout. A
                 # periodic branded background keeps long decks from becoming a
                 # sequence of nearly identical pale pages.
@@ -866,6 +883,9 @@ def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, j
                 p=plain[(si+vi)%min(3,len(plain))]
             title_style=_style(style_title.style,design,p.background,'title')
             body_style=_style(style_body,design,p.background)
+            dark_slide=_dark_background(p.background)
+            slide_accent='FFFFFF' if dark_slide else accent
+            if dark_slide:title_style.color=body_style.color='FFFFFF'
             supports=ps.support_points or _supporting_points(ps,claims,3)
             lead_text=_semantic_lead(ps,variant)
             lead_key=_phrase_key(lead_text)
@@ -882,24 +902,31 @@ def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, j
                 nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=.62,w=cover_w,h=.27),style=body_style,text=lead_text,claim_ids=ps.claim_ids))
             else:
                 branded_slide=p in branded
-                content_right=.70 if branded_slide else .94
+                safe_right=template_text_right(p) if branded_slide else None
+                content_right=min(.70,max(.465,safe_right or .70)-.012) if branded_slide else .94
                 title_h=.19 if len(ps.title)<=50 else .28
                 title_style.size=_scale_size(design,28,{'A':38,'B':34,'C':32}[variant])
                 nodes.append(Node(id=f'{ps.id}-title',kind='text',role='title',box=Box(x=.06,y=.07,w=content_right-.06,h=title_h),style=title_style,text=ps.title))
-                nodes.append(Node(id=f'{ps.id}-accent',kind='text',role='accent',box=Box(x=.06,y=.07+title_h+.01,w=.10,h=.012),style=Style(font=body_style.font,size=18,color=accent,fill=accent),text=''))
+                nodes.append(Node(id=f'{ps.id}-accent',kind='text',role='accent',box=Box(x=.06,y=.07+title_h+.01,w=.10,h=.012),style=Style(font=body_style.font,size=18,color=slide_accent,fill=slide_accent),text=''))
                 top=.07+title_h+.07
                 if visual!='none':
                     if variant=='A':
                         lead=body_style.model_copy(deep=True);lead.size=_scale_size(design,22,28)
-                        nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=content_right-.06,h=.20),style=lead,text=lead_text,claim_ids=ps.claim_ids))
-                        vb=Box(x=.08,y=top+.23,w=content_right-.10,h=max(.30,.88-(top+.23)))
+                        if visual=='image':
+                            nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=.42,h=max(.34,.84-top)),style=lead,text=lead_text,claim_ids=ps.claim_ids))
+                            vb=Box(x=.53,y=top,w=.41,h=max(.42,.88-top))
+                        else:
+                            nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=content_right-.06,h=.20),style=lead,text=lead_text,claim_ids=ps.claim_ids))
+                            vb=Box(x=.08,y=top+.23,w=content_right-.10,h=max(.30,.88-(top+.23)))
                     elif variant=='B':
                         lead=body_style.model_copy(deep=True);lead.size=_scale_size(design,20,22)
                         left=.37 if branded_slide else .41
                         nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=left,h=.27),style=lead,text=lead_text,claim_ids=ps.claim_ids))
                         if supports:
                             support_style=body_style.model_copy(deep=True);support_style.size=_scale_size(design,18,18)
-                            nodes.append(Node(id=f'{ps.id}-support-1',kind='text',role='support',box=Box(x=.06,y=top+.31,w=left,h=.28),style=support_style,text=supports[0],claim_ids=ps.claim_ids))
+                            support_top=top+.31
+                            support_h=min(.28,max(.12,.90-support_top))
+                            nodes.append(Node(id=f'{ps.id}-support-1',kind='text',role='support',box=Box(x=.06,y=support_top,w=left,h=support_h),style=support_style,text=supports[0],claim_ids=ps.claim_ids))
                         vb=Box(x=.50,y=top,w=content_right-.50,h=.58)
                     else:
                         lead=body_style.model_copy(deep=True);lead.size=_scale_size(design,18,18)
@@ -925,7 +952,7 @@ def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, j
                             cols=min(2,len(supports));col_w=(lead_w-.05)/cols
                             for idx,text in enumerate(supports[:2]):
                                 x=.06+idx*(col_w+.05)
-                                nodes.append(Node(id=f'{ps.id}-support-accent-{idx+1}',kind='text',role='accent',box=Box(x=x,y=top+.30,w=.055,h=.009),style=Style(font=body_style.font,size=18,color=accent,fill=accent),text=''))
+                                nodes.append(Node(id=f'{ps.id}-support-accent-{idx+1}',kind='text',role='accent',box=Box(x=x,y=top+.30,w=.055,h=.009),style=Style(font=body_style.font,size=18,color=slide_accent,fill=slide_accent),text=''))
                                 nodes.append(Node(id=f'{ps.id}-support-{idx+1}',kind='text',role='support',box=Box(x=x,y=top+.34,w=col_w,h=.31),style=support_style,text=text,claim_ids=ps.claim_ids))
                     else:
                         lead=body_style.model_copy(deep=True);lead.size=_scale_size(design,18,18)
@@ -938,12 +965,12 @@ def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, j
                                 x=.06+idx*(col_w+.04);y=top+.22;w=col_w;h=.22;accent_y=top+.19
                             else:
                                 x=.06;y=top+.49;w=lead_w;h=.13;accent_y=top+.46
-                            nodes.append(Node(id=f'{ps.id}-support-accent-{idx+1}',kind='text',role='accent',box=Box(x=x,y=accent_y,w=.045,h=.008),style=Style(font=body_style.font,size=18,color=accent,fill=accent),text=''))
+                            nodes.append(Node(id=f'{ps.id}-support-accent-{idx+1}',kind='text',role='accent',box=Box(x=x,y=accent_y,w=.045,h=.008),style=Style(font=body_style.font,size=18,color=slide_accent,fill=slide_accent),text=''))
                             nodes.append(Node(id=f'{ps.id}-support-{idx+1}',kind='text',role='support',box=Box(x=x,y=y,w=w,h=h),style=support_style,text=text,claim_ids=ps.claim_ids))
             if visual!='none' and not is_cover and not last:
                 kind='diagram' if visual in {'sequence','list','hierarchy'} else visual
                 items=_diagram_items(ps,claims)[:{'A':2,'B':3,'C':3}[variant]]
-                data=datasets[ps.dataset_id].model_dump() if ps.dataset_id else assets[ps.asset_id].model_dump() if ps.asset_id else {'layout':visual,'items':items,'accent':accent,'surface':surface}
+                data=datasets[ps.dataset_id].model_dump() if ps.dataset_id else assets[ps.asset_id].model_dump() if ps.asset_id else {'layout':_diagram_layout(ps),'items':items,'accent':slide_accent,'surface':surface}
                 visualstyle=_style(style_body,design,p.background);visualstyle.size=_scale_size(design,20,22)
                 visualstyle.fill=surface
                 nodes.append(Node(id=f'{ps.id}-visual',kind=kind,role='visual',box=vb,style=visualstyle,data=data,claim_ids=ps.claim_ids if kind=='diagram' else []))
