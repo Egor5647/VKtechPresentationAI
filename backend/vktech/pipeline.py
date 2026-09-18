@@ -5,14 +5,15 @@ import os
 import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from .contracts import ContentIR,DesignIR,GenerateRequest,SceneIR,AuditReport,RepairRequest,SelectionRequest,ExportRequest,RegenerateSlideRequest,Asset
+from .contracts import ContentIR,DesignIR,GenerateRequest,SceneIR,AuditReport,RepairRequest,SelectionRequest,ExportRequest,RegenerateSlideRequest,PaletteRequest,PaletteSpec,PresentationPlan,Asset
 from .store import Store
 from .settings import artifact_path,ROOT,config
 from .model import ModelGateway
-from .planning import plan_with_model,build_scenes,regenerate_slide_with_model,enrich_plan,validate_plan
+from .planning import plan_with_model,build_scenes,regenerate_slide_with_model,enrich_plan,validate_plan,assign_visual_strategies
 from .export import export_pptx,render,export_html
 from .audit import audit_scene,contextual_audit,project_contextual_issues,repair_scene
 from .selection import score_candidate,choose_variants,compose_scene
+from .palette import palette_from_design,recolor_design,recolor_generated_assets,recolor_scene,recolor_template,replace_scene_asset_paths
 
 
 def write_json(path,doc):path.write_text(json.dumps(doc,ensure_ascii=False,indent=2),encoding='utf-8')
@@ -47,6 +48,7 @@ class Pipeline:
         folder=artifact_path(f'jobs/{job.id}/{job.lease_owner}')
         folder.mkdir(parents=True,exist_ok=True)
         def stage(name):self.store.owned_update(job.id,job.lease_owner,stage=name)
+        if job.kind=='recolor':return self._recolor(job,payload,folder,started,stage)
         stage('loading')
         if job.kind=='compose':return self._compose(job,payload,folder,started,stage)
         parentresult=None;regenerate=None;recompose=False
@@ -67,10 +69,13 @@ class Pipeline:
         if regenerate or recompose:
             design=DesignIR.model_validate_json(artifact_path(parentresult['artifacts']['design']).read_bytes())
             content=ContentIR.model_validate_json(artifact_path(parentresult['artifacts']['content']).read_bytes())
-            from .contracts import PresentationPlan
             plan=PresentationPlan.model_validate_json(artifact_path(parentresult['artifacts']['plan']).read_bytes())
         else:
             design=DesignIR.model_validate(json.loads(tr.document));content=ContentIR.model_validate(json.loads(cr.document))
+        if parentresult and parentresult.get('palette'):
+            source_design_path=parentresult.get('artifacts',{}).get('source_design',parentresult['artifacts']['design'])
+            source_design=DesignIR.model_validate_json(artifact_path(source_design_path).read_bytes())
+            template=recolor_template(template,source_design,PaletteSpec.model_validate(parentresult['palette']))
         stage('planning')
         if job.kind=='repair':
             if scene.version>=1+config('pipeline.yaml')['repair_attempts']:raise ValueError('Repair attempt limit reached; edit content or layout explicitly')
@@ -94,16 +99,14 @@ class Pipeline:
             plan=enrich_plan(plan,content);write_json(folder/'plan.json',plan.model_dump());scenes=build_scenes(design,content,plan,job.id)
         else:
             before=time.monotonic();plan=plan_with_model(self.gateway,content,original);timings['planning']=time.monotonic()-before
+            plan=assign_visual_strategies(plan,content,original.generate_images)
             if original.generate_images:
                 from .runtime import local_image_phase
-                candidates=[ps for i,ps in enumerate(plan.slides) if ps.visual=='none' and ps.role=='content' and i<len(plan.slides)-1 and not any(word in (ps.title+' '+ps.message).lower() for word in ('вопрос','домашн','спасибо','итог'))]
-                priority=('reduc','редук','dag','граф','планиров','scheduler','pram','памят','work','span','fork','join','parallel for','цикл','конфликт','границ')
-                candidates.sort(key=lambda ps:(0 if any(word in (ps.title+' '+ps.message).lower() for word in priority) else 1,ps.id))
-                image_count=max(0,min(8,int(os.environ.get('T2I_IMAGE_COUNT','4'))))
+                candidates=sorted((ps for ps in plan.slides if ps.visual_strategy=='generated_image'),key=lambda ps:(-ps.visual_score,ps.id))[:8]
                 image_started=time.monotonic();generated_count=0
                 generated_hashes=set()
                 with local_image_phase():
-                    for ps in candidates[:image_count]:
+                    for ps in candidates:
                         output=folder/(ps.id+'-generated.png');prompt=illustration_prompt(ps)
                         for attempt in range(2):
                             self.gateway.image(prompt+(' Alternative bird-eye composition with a distinct silhouette.' if attempt else ''),output)
@@ -160,7 +163,13 @@ class Pipeline:
             scores=parentresult.get('candidate_scores',{});reasons=parentresult.get('candidate_reasons',{})
         slide_options=self._slide_options(plan,variants,selection,scores,reasons) if plan else parentresult.get('slides',[])
         elapsed=round(time.monotonic()-started,3)
-        manifest={'request':original.model_dump(),'profile':self.gateway.profile,'model_manifest':self.gateway.manifest,'model_calls':self.gateway.calls,'workflow_hashes':workflow_manifest(),'timings':timings,'elapsed_seconds':elapsed,'deadline_met':elapsed<=config('pipeline.yaml')['deadline_seconds'],'font_verification':'see environment/unknown issues in audit','contextual_audit_strategy':'candidate B checked once; content findings projected because candidates share the same facts','variants':variants,'candidate_scores':scores,'candidate_reasons':reasons,'selection':selection,'slides':slide_options,'presentation':presentation,'artifacts':{'plan':plan_path,'content':str((folder/'content.json').relative_to(artifact_path('.'))),'design':str((folder/'design.json').relative_to(artifact_path('.')))}}
+        current_palette=(parentresult.get('palette') if parentresult else None) or palette_from_design(design).model_dump()
+        source_palette=(parentresult.get('source_palette') if parentresult else None) or current_palette
+        source_design=parentresult.get('artifacts',{}).get('source_design') if parentresult else None
+        source_variants=parentresult.get('artifacts',{}).get('source_variants') if parentresult else None
+        artifacts={'plan':plan_path,'content':str((folder/'content.json').relative_to(artifact_path('.'))),'design':str((folder/'design.json').relative_to(artifact_path('.')))}
+        artifacts['source_design']=source_design or artifacts['design'];artifacts['source_variants']=source_variants or {variant:value['scene'] for variant,value in variants.items()}
+        manifest={'request':original.model_dump(),'profile':self.gateway.profile,'model_manifest':self.gateway.manifest,'model_calls':self.gateway.calls,'workflow_hashes':workflow_manifest(),'timings':timings,'elapsed_seconds':elapsed,'deadline_met':elapsed<=config('pipeline.yaml')['deadline_seconds'],'font_verification':'see environment/unknown issues in audit','contextual_audit_strategy':'candidate B checked once; content findings projected because candidates share the same facts','palette':current_palette,'source_palette':source_palette,'variants':variants,'candidate_scores':scores,'candidate_reasons':reasons,'selection':selection,'slides':slide_options,'presentation':presentation,'artifacts':artifacts}
         write_json(folder/'manifest.json',manifest)
         manifest['manifest']=str((folder/'manifest.json').relative_to(artifact_path('.')))
         return manifest
@@ -192,7 +201,7 @@ class Pipeline:
         labels={'A':'Крупно и кратко','B':'Сбалансированно','C':'Подробно'};result=[]
         for index,slide in enumerate(plan.slides):
             options={v:{'label':labels[v],'preview':variants[v]['previews'][index],'score':scores.get(slide.id,{}).get(v,0),'reasons':reasons.get(slide.id,{}).get(v,{})} for v in ('A','B','C')}
-            result.append({'id':slide.id,'title':slide.title,'archetype':slide.archetype,'lead':slide.message,'balanced_message':slide.balanced_message,'support_points':slide.support_points,'takeaway':slide.takeaway,'selected':selection.get(slide.id,'A'),'options':options})
+            result.append({'id':slide.id,'title':slide.title,'archetype':slide.archetype,'lead':slide.message,'balanced_message':slide.balanced_message,'support_points':slide.support_points,'takeaway':slide.takeaway,'visual_strategy':slide.visual_strategy,'visual_score':slide.visual_score,'visual_reason':slide.visual_reason,'selected':selection.get(slide.id,'A'),'options':options})
         return result
 
     def _compose(self,job,payload,folder,started,stage):
@@ -208,6 +217,9 @@ class Pipeline:
             if request.slide_id not in result['selection']:raise ValueError('Unknown slide ID')
             selection={**result['selection'],request.slide_id:request.variant}
         tr=self.store.record(original.template_id,'template');template=artifact_path(tr.path).read_bytes()
+        source_design_path=result.get('artifacts',{}).get('source_design',result['artifacts']['design'])
+        source_design=DesignIR.model_validate_json(artifact_path(source_design_path).read_bytes())
+        if result.get('palette'):template=recolor_template(template,source_design,PaletteSpec.model_validate(result['palette']))
         design=DesignIR.model_validate_json(artifact_path(result['artifacts']['design']).read_bytes())
         content=ContentIR.model_validate_json(artifact_path(result['artifacts']['content']).read_bytes())
         scenes=[SceneIR.model_validate_json(artifact_path(result['variants'][v]['scene']).read_bytes()) for v in ('A','B','C')]
@@ -219,4 +231,58 @@ class Pipeline:
         elapsed=round(time.monotonic()-started,3)
         manifest={**result,'model_calls':[],'timings':{'selected_export_render':round(material[7],3)},'elapsed_seconds':elapsed,'deadline_met':elapsed<=config('pipeline.yaml')['deadline_seconds'],'selection':selection,'slides':slides,'presentation':presentation}
         manifest.pop('manifest',None);write_json(folder/'manifest.json',manifest);manifest['manifest']=str((folder/'manifest.json').relative_to(artifact_path('.')))
+        return manifest
+
+    def _recolor(self,job,payload,folder,started,stage):
+        parent=self.store.job(payload['parent_job_id']);parentresult=json.loads(parent.result)
+        if parent.state!='ready':raise ValueError('Parent job is not ready')
+        request=PaletteRequest.model_validate(payload['request']);palette=request.palette
+        original=GenerateRequest.model_validate(parentresult['request'])
+        selection=dict(request.selection or parentresult['selection'])
+        if set(selection)!=set(parentresult['selection']):raise ValueError('Selection must contain every slide exactly once')
+        source_design_path=parentresult.get('artifacts',{}).get('source_design',parentresult['artifacts']['design'])
+        source_design=DesignIR.model_validate_json(artifact_path(source_design_path).read_bytes())
+        design=recolor_design(source_design,palette)
+        content=ContentIR.model_validate_json(artifact_path(parentresult['artifacts']['content']).read_bytes())
+        content,replacements=recolor_generated_assets(content,source_design,palette,folder)
+        plan=PresentationPlan.model_validate_json(artifact_path(parentresult['artifacts']['plan']).read_bytes())
+        source_variants=parentresult.get('artifacts',{}).get('source_variants') or {variant:parentresult['variants'][variant]['scene'] for variant in ('A','B','C')}
+        source_scenes={variant:SceneIR.model_validate_json(artifact_path(path).read_bytes()) for variant,path in source_variants.items()}
+        scenes=[replace_scene_asset_paths(recolor_scene(source_scenes[variant],source_design,palette),replacements) for variant in ('A','B','C')]
+        used_colors=[]
+        for scene in scenes:
+            for slide in scene.slides:
+                used_colors.append(slide.background)
+                for node in slide.nodes:used_colors.extend(filter(None,(node.style.color,node.style.fill)))
+        design.palette=list(dict.fromkeys([*design.palette,*used_colors]))
+        raw=artifact_path(self.store.record(original.template_id,'template').path).read_bytes()
+        template=recolor_template(raw,source_design,palette)
+        write_json(folder/'content.json',content.model_dump());write_json(folder/'design.json',design.model_dump())
+        stage('layout_export_render')
+        with ThreadPoolExecutor(max_workers=2) as pool:materials=list(pool.map(lambda scene:self._materialize(scene,folder,template,design,content),scenes))
+        variants={};material_by_variant={material[0].variant:material for material in materials};timings={}
+        for material in materials:
+            scene,out,pptx,pdf,html,previews,report,seconds=material
+            source_report=AuditReport.model_validate_json(artifact_path(parentresult['variants'][scene.variant]['audit']).read_bytes())
+            contextual=[issue for issue in source_report.issues if issue.category=='contextual']
+            report.issues.extend(project_contextual_issues(contextual,source_scenes[scene.variant],scene))
+            variants[scene.variant]=self._entry(scene,out,pptx,pdf,html,previews,report)
+            timings[scene.variant+'_export_render']=round(seconds,3)
+        scores={};reasons={}
+        for index,slide in enumerate(scenes[0].slides):
+            scores[slide.id]={};reasons[slide.id]={}
+            for variant in ('A','B','C'):
+                material=material_by_variant[variant];value,detail=score_candidate(material[0],material[0].slides[index],material[5][index])
+                scores[slide.id][variant]=value;reasons[slide.id][variant]=detail
+        selected=compose_scene(scenes,selection,job.id+'-selected')
+        selected_material=self._materialize(selected,folder,template,design,content,'presentation')
+        source_selected=SceneIR.model_validate_json(artifact_path(parentresult['presentation']['scene']).read_bytes())
+        source_selected_report=AuditReport.model_validate_json(artifact_path(parentresult['presentation']['audit']).read_bytes())
+        selected_material[6].issues.extend(project_contextual_issues([issue for issue in source_selected_report.issues if issue.category=='contextual'],source_selected,selected))
+        presentation=self._entry(*selected_material[:7]);timings['selected_export_render']=round(selected_material[7],3)
+        slides=self._slide_options(plan,variants,selection,scores,reasons)
+        elapsed=round(time.monotonic()-started,3)
+        artifacts={'plan':parentresult['artifacts']['plan'],'content':str((folder/'content.json').relative_to(artifact_path('.'))),'design':str((folder/'design.json').relative_to(artifact_path('.'))),'source_design':source_design_path,'source_variants':source_variants}
+        manifest={'request':original.model_dump(),'profile':parentresult.get('profile','selection'),'model_manifest':parentresult.get('model_manifest',{}),'model_calls':[],'workflow_hashes':workflow_manifest(),'timings':timings,'elapsed_seconds':elapsed,'deadline_met':elapsed<=config('pipeline.yaml')['deadline_seconds'],'palette':palette.model_dump(),'source_palette':parentresult.get('source_palette') or palette_from_design(source_design).model_dump(),'variants':variants,'candidate_scores':scores,'candidate_reasons':reasons,'selection':selection,'slides':slides,'presentation':presentation,'artifacts':artifacts}
+        write_json(folder/'manifest.json',manifest);manifest['manifest']=str((folder/'manifest.json').relative_to(artifact_path('.')))
         return manifest

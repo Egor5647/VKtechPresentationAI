@@ -252,6 +252,52 @@ def normalize_plan(plan: PresentationPlan) -> PresentationPlan:
     return result
 
 
+def assign_visual_strategies(plan: PresentationPlan,content: ContentIR,allow_generated: bool) -> PresentationPlan:
+    """Choose the visual medium from slide semantics instead of a fixed image quota."""
+    result=plan.model_copy(deep=True);last=len(result.slides)-1
+    image_words=re.compile(r'сценар|ситуац|пользоват|клиент|команд|человек|продукт|интерфейс|экосистем|инфраструктур|реальн\w* систем|практическ\w* контекст|concurrency.+parallelism',re.I)
+    formula_words=re.compile(r'формул|доказ|теорем|границ|оценк|[≤≥=]|θ\s*\(|\bo\s*\(',re.I)
+    hierarchy_words=re.compile(r'\bdag\b|граф|зависим|иерарх|архитектур',re.I)
+    sequence_words=re.compile(r'этап|алгоритм|процесс|fork.?join|редукц|scheduler|планиров|broadcast|parallel for|цикл',re.I)
+    comparison_words=re.compile(r'сравн|различ|режим|\bversus\b|\bvs\b|erew.+crew|crew.+crcw',re.I)
+    for index,slide in enumerate(result.slides):
+        text=' '.join((slide.title,slide.message,slide.visual_brief)).lower()
+        if slide.dataset_id:
+            slide.visual_strategy='table' if slide.visual=='table' else 'chart';slide.visual_score=1;slide.visual_reason='Числовые данные точнее передаются нативной диаграммой или таблицей.';continue
+        if slide.asset_id:
+            slide.visual='image';slide.visual_strategy='source_image';slide.visual_score=1;slide.visual_reason='В материалах есть связанное исходное изображение.';continue
+        if slide.role in {'cover','divider'} or index==last:
+            slide.visual='none';slide.visual_strategy='none';slide.visual_score=.95;slide.visual_reason='Оформление шаблона уже выполняет визуальную функцию этого слайда.';continue
+        score=.18
+        if slide.archetype=='illustration':score+=.55
+        elif slide.archetype=='example':score+=.34
+        if image_words.search(text):score+=.46
+        if re.search(r'метафор|визуальн\w* образ|истори|сценар',text,re.I):score+=.28
+        if formula_words.search(text):score-=.52
+        native_kind=None
+        if hierarchy_words.search(text):native_kind='hierarchy'
+        elif sequence_words.search(text):native_kind='sequence'
+        elif comparison_words.search(text):native_kind='list'
+        if native_kind:score-=.24
+        score=max(0,min(1,score))
+        if score>=.68:
+            slide.visual='none';slide.visual_strategy='generated_image';slide.visual_score=round(score,2)
+            slide.visual_reason='Слайд описывает ситуацию или концептуальное различие, которое полезно показать иллюстрацией.'
+        elif native_kind:
+            slide.visual=native_kind;slide.visual_strategy='diagram';slide.visual_score=.9
+            slide.visual_reason='Связи и последовательность точнее показываются редактируемой нативной схемой.'
+        elif slide.visual in {'sequence','list','hierarchy'}:
+            slide.visual_strategy='diagram';slide.visual_score=.72;slide.visual_reason='Планировщик выбрал нативную схему для структурирования тезисов.'
+        else:
+            slide.visual='none';slide.visual_strategy='none';slide.visual_score=.76
+            slide.visual_reason='Отдельная иллюстрация не добавляет смысла к тексту или формуле.'
+        if slide.visual_strategy=='generated_image' and not allow_generated:
+            # Keep the recommendation for a later image-enabled run while
+            # producing a valid deck without a missing asset.
+            slide.visual='none'
+    return result
+
+
 def _archetype(slide,index=0,count=1):
     text=(slide.title+' '+slide.message).lower()
     if slide.role=='cover' or index==0:return 'cover'

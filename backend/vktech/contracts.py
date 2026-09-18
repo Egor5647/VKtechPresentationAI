@@ -120,6 +120,9 @@ class PlanSlide(Contract):
     balanced_message: str = Field(default="", max_length=240)
     visual_items: list[str] = Field(default_factory=list, max_length=3)
     visual_brief: str = Field(default="", max_length=300)
+    visual_strategy: Literal["none", "generated_image", "source_image", "diagram", "chart", "table"] = "none"
+    visual_score: float = Field(default=0, ge=0, le=1)
+    visual_reason: str = Field(default="", max_length=240)
 
 
 class PresentationPlan(Contract):
@@ -207,6 +210,26 @@ class GenerateRequest(Contract):
     purpose: str = "project"
     slide_count: int = Field(default=12, ge=1, le=50)
     generate_images: bool = False
+
+
+class PaletteSpec(Contract):
+    background: str = Field(default="FFFFFF", pattern=r"^[0-9A-Fa-f]{6}$")
+    surface: str = Field(default="E8EEF6", pattern=r"^[0-9A-Fa-f]{6}$")
+    accent: str = Field(default="0077FF", pattern=r"^[0-9A-Fa-f]{6}$")
+    accent_secondary: str = Field(default="31C48D", pattern=r"^[0-9A-Fa-f]{6}$")
+    text_primary: str = Field(default="172438", pattern=r"^[0-9A-Fa-f]{6}$")
+    text_on_accent: str = Field(default="FFFFFF", pattern=r"^[0-9A-Fa-f]{6}$")
+
+    @model_validator(mode="after")
+    def uppercase(self):
+        for name in ("background", "surface", "accent", "accent_secondary", "text_primary", "text_on_accent"):
+            setattr(self,name,getattr(self,name).upper())
+        return self
+
+
+class PaletteRequest(Contract):
+    palette: PaletteSpec
+    selection: dict[str, Literal["A", "B", "C"]] | None = Field(default=None, min_length=1, max_length=50)
 
 
 class RepairRequest(Contract):

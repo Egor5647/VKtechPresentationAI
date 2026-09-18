@@ -6,8 +6,9 @@ type Export={version:number;scene:string;audit:string;pptx:string;html:string;pd
 type Option={label:string;preview:string;score:number;reasons:Record<string,unknown>};
 type Variant='A'|'B'|'C';
 type Format='pptx'|'pdf'|'html';
-type SlideChoice={id:string;title:string;archetype:string;lead:string;support_points:string[];takeaway:string;selected:Variant;options:Record<Variant,Option>};
-type Result={presentation?:Export;variants?:Record<string,Export>;slides?:SlideChoice[];selection?:Record<string,string>;elapsed_seconds?:number;deadline_met?:boolean};
+type Palette={background:string;surface:string;accent:string;accent_secondary:string;text_primary:string;text_on_accent:string};
+type SlideChoice={id:string;title:string;archetype:string;lead:string;support_points:string[];takeaway:string;visual_strategy?:string;visual_score?:number;visual_reason?:string;selected:Variant;options:Record<Variant,Option>};
+type Result={presentation?:Export;variants?:Record<string,Export>;slides?:SlideChoice[];selection?:Record<string,string>;palette?:Palette;source_palette?:Palette;elapsed_seconds?:number;deadline_met?:boolean};
 type Job={id:string;state:string;stage:string;error:string;result:Result};
 type Template={id:string;name:string;design:{prototypes:unknown[];fonts:string[];warnings:string[]}};
 type Content={id:string;name:string;content:{claims:unknown[];datasets:unknown[]}};
@@ -16,6 +17,10 @@ type Health={model_configured:boolean;image_model_configured:boolean;renderer_av
 const stages:Record<string,string>={queued:'В очереди',starting:'Запуск',loading:'Чтение материалов',planning:'Планирование содержания',layout_export_render:'Сборка и экспорт',contextual_audit:'Проверка содержания',finalizing:'Сохранение результата',ready:'Готово',awaiting_input:'Нужны сведения',failed:'Ошибка',cancelled:'Отменено'};
 const archetypes:Record<string,string>={cover:'Обложка',divider:'Раздел',explanation:'Объяснение',comparison:'Сравнение',process:'Процесс',example:'Пример',formula:'Формула',exercise:'Задание',summary:'Итог',illustration:'Иллюстрация'};
 const variantNames:Record<Variant,string>={A:'Крупно и кратко',B:'Сбалансированно',C:'Подробно'};
+const fallbackPalette:Palette={background:'FFFFFF',surface:'E8EEF6',accent:'0077FF',accent_secondary:'31C48D',text_primary:'172438',text_on_accent:'FFFFFF'};
+const greenPalette:Palette={background:'F4F7F4',surface:'DCE9E1',accent:'0B5D3B',accent_secondary:'4D8A68',text_primary:'14251D',text_on_accent:'FFFFFF'};
+const graphitePalette:Palette={background:'F5F6F7',surface:'E3E6E8',accent:'34464F',accent_secondary:'7A8F86',text_primary:'182126',text_on_accent:'FFFFFF'};
+const paletteFields:[keyof Palette,string][]=[['accent','Акцент'],['accent_secondary','Дополнительный'],['surface','Карточки'],['background','Фон']];
 
 async function api<T>(url:string,init?:RequestInit):Promise<T>{
   const response=await fetch(url,init);
@@ -23,12 +28,17 @@ async function api<T>(url:string,init?:RequestInit):Promise<T>{
   return response.json();
 }
 const fileURL=(job:string,path:string)=>`/api/jobs/${job}/file?path=${encodeURIComponent(path)}`;
+const withHash=(value:string)=>'#'+value.replace('#','');
+const withoutHash=(value:string)=>value.replace('#','').toUpperCase();
+const normalizePalette=(value?:Partial<Palette>):Palette=>({background:value?.background||fallbackPalette.background,surface:value?.surface||fallbackPalette.surface,accent:value?.accent||fallbackPalette.accent,accent_secondary:value?.accent_secondary||fallbackPalette.accent_secondary,text_primary:value?.text_primary||fallbackPalette.text_primary,text_on_accent:value?.text_on_accent||fallbackPalette.text_on_accent});
+function hue(value:string){const hex=withoutHash(value),r=parseInt(hex.slice(0,2),16)/255,g=parseInt(hex.slice(2,4),16)/255,b=parseInt(hex.slice(4,6),16)/255,max=Math.max(r,g,b),min=Math.min(r,g,b),d=max-min;if(!d)return 0;let h=max===r?((g-b)/d)%6:max===g?(b-r)/d+2:(r-g)/d+4;return (h*60+360)%360}
 
 function App(){
   const [templates,setTemplates]=useState<Template[]>([]),[contents,setContents]=useState<Content[]>([]);
   const [template,setTemplate]=useState(''),[content,setContent]=useState(''),[brief,setBrief]=useState(''),[count,setCount]=useState(12),[purpose,setPurpose]=useState('project'),[images,setImages]=useState(true);
   const [job,setJob]=useState<Job|null>(null),[slide,setSlide]=useState(0),[instruction,setInstruction]=useState('Сделай слайд выразительнее и плотнее, сохрани все факты.');
   const [draftSelection,setDraftSelection]=useState<Record<string,Variant>>({}),[exportTask,setExportTask]=useState<{id:string;format:Format}|null>(null);
+  const [palette,setPalette]=useState<Palette>(fallbackPalette),[appliedPalette,setAppliedPalette]=useState<Palette>(fallbackPalette),[sourcePalette,setSourcePalette]=useState<Palette>(fallbackPalette);
   const [error,setError]=useState(''),[busy,setBusy]=useState(false),[health,setHealth]=useState<Health|null>(null);
 
   async function refresh(){
@@ -49,6 +59,7 @@ function App(){
     if(!job)return;localStorage.setItem('vktech-job',job.id);
     if(job.state==='ready'&&job.result.selection){
       setDraftSelection(job.result.selection as Record<string,Variant>);
+      const next=normalizePalette(job.result.palette||job.result.source_palette);setPalette(next);setAppliedPalette(next);setSourcePalette(normalizePalette(job.result.source_palette||next));
       setSlide(current=>Math.min(current,(job.result.slides?.length||1)-1));
       const url=new URL(window.location.href);url.searchParams.set('job',job.id);window.history.replaceState({},'',url);
     }
@@ -77,6 +88,10 @@ function App(){
     try{const created=await api<{id:string}>(`/api/jobs/${job.id}/export`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({selection})});setExportTask({id:created.id,format})}catch(e){setError((e as Error).message)}
   }
   const completeSelection=()=>Object.fromEntries(choices.map(choice=>[choice.id,draftSelection[choice.id]||choice.selected])) as Record<string,Variant>;
+  const paletteDirty=JSON.stringify(palette)!==JSON.stringify(appliedPalette);
+  const previewFilter=paletteDirty?`hue-rotate(${Math.round(hue(palette.accent)-hue(appliedPalette.accent))}deg) saturate(92%)`:undefined;
+  const choosePalette=(next:Palette)=>setPalette({...next});
+  const applyPalette=()=>beginChild('palette',{palette,selection:completeSelection()});
 
   const result=job?.result;
   const presentation=result?.presentation;
@@ -99,6 +114,14 @@ function App(){
         <label className="checkbox"><input type="checkbox" checked={images} disabled={!health?.image_model_configured} onChange={e=>setImages(e.target.checked)}/>Создать иллюстрации</label>
         <button className="primary" onClick={start} disabled={busy||!template||!content||!brief.trim()||['queued','running'].includes(job?.state||'')}>Создать презентацию</button>
         {health&&!health.model_configured&&<p className="notice">Для генерации нужно запустить текстовую модель.</p>}{health&&!health.image_model_configured&&<p className="notice">Генератор новых иллюстраций сейчас недоступен.</p>}{health&&!health.renderer_available&&<p className="notice">Для PDF и превью нужен LibreOffice.</p>}
+        {job?.state==='ready'&&presentation&&<section className="palette-panel">
+          <div className="palette-title"><b>Цветовая гамма</b><span className={paletteDirty?'changed':''}>{paletteDirty?'Изменена':'Применена'}</span></div>
+          <div className="palette-presets">
+            {([[sourcePalette,'Исходная'],[greenPalette,'Тёмно-зелёная'],[graphitePalette,'Графитовая']] as [Palette,string][]).map(([item,label])=><button key={label} title={label} aria-label={label} className={JSON.stringify(palette)===JSON.stringify(item)?'active':''} onClick={()=>choosePalette(item)}><i style={{background:withHash(item.accent)}}/><i style={{background:withHash(item.accent_secondary)}}/><i style={{background:withHash(item.surface)}}/></button>)}
+          </div>
+          <div className="palette-fields">{paletteFields.map(([field,label])=><label key={field}><span>{label}</span><input type="color" value={withHash(palette[field])} onChange={e=>setPalette(previous=>({...previous,[field]:withoutHash(e.target.value)}))}/></label>)}</div>
+          <button className="palette-apply" disabled={!paletteDirty||busy||Boolean(exportTask)} onClick={applyPalette}>{busy?'Применение…':'Применить к презентации'}</button>
+        </section>}
       </aside>
       <section className="workspace">
         {error&&<div role="alert" className="error">{error}<button onClick={()=>setError('')}>×</button></div>}
@@ -108,12 +131,12 @@ function App(){
           {job.error&&<div className="error">{job.error}</div>}{['failed','awaiting_input'].includes(job.state)&&<button onClick={()=>api<Job>(`/api/jobs/${job.id}/retry`,{method:'POST'}).then(setJob).catch(e=>setError(e.message))}>Повторить после устранения причины</button>}
           {legacyReady&&<div className="notice-card">Этот результат создан старой версией сервиса. Нажмите «Создать презентацию», чтобы получить выбор вариантов для каждого слайда.</div>}
           {job.state==='ready'&&presentation&&currentChoice&&<>
-            <div className="result-head"><div className="exports">{(['pptx','pdf','html'] as const).map(format=><button key={format} disabled={Boolean(exportTask)} onClick={()=>download(format)}>{exportTask?.format===format?'Сборка…':format.toUpperCase()+' ↓'}</button>)}</div></div>
+            <div className="result-head"><div className="exports">{(['pptx','pdf','html'] as const).map(format=><button key={format} disabled={Boolean(exportTask)||paletteDirty} onClick={()=>download(format)}>{exportTask?.format===format?'Сборка…':format.toUpperCase()+' ↓'}</button>)}</div></div>
             <div className="review">
               <div className="viewer">
-                <div className="slide-preview"><img src={fileURL(job.id,currentChoice.options[selectedFor(currentChoice)].preview)} alt={currentChoice.title}/></div>
+                <div className="slide-preview"><img style={{filter:previewFilter}} src={fileURL(job.id,currentChoice.options[selectedFor(currentChoice)].preview)} alt={currentChoice.title}/></div>
                 <div className="pagination"><button disabled={slide===0} onClick={()=>setSlide(slide-1)}>←</button><span>{slide+1} / {choices.length} · {currentChoice.title}</span><button disabled={slide+1===choices.length} onClick={()=>setSlide(slide+1)}>→</button></div>
-                <div className="deck-thumbs">{choices.map((choice,index)=>{const selected=selectedFor(choice);const preview=choice.options[selected].preview;return <button key={choice.id} className={slide===index?'active':''} onClick={()=>setSlide(index)}><img src={fileURL(job.id,preview)} alt={`Слайд ${index+1}`}/><span>{index+1}</span><i>{selected}</i></button>})}</div>
+                <div className="deck-thumbs">{choices.map((choice,index)=>{const selected=selectedFor(choice);const preview=choice.options[selected].preview;return <button key={choice.id} className={slide===index?'active':''} onClick={()=>setSlide(index)}><img style={{filter:previewFilter}} src={fileURL(job.id,preview)} alt={`Слайд ${index+1}`}/><span>{index+1}</span><i>{selected}</i></button>})}</div>
               </div>
               <aside className="slide-editor">
                 <div className="eyebrow">СЛАЙД {slide+1} · {archetypes[currentChoice.archetype]||currentChoice.archetype}</div><h2>{currentChoice.title}</h2><p className="lead">{currentChoice.lead}</p>

@@ -3,11 +3,12 @@ import shutil
 import pytest
 from pptx import Presentation
 from vktech.template import import_template
-from vktech.planning import NeedsInput,build_scenes,validate_plan,plan_with_model,normalize_plan,planning_claims,enrich_plan,fit_semantic_variants
+from vktech.planning import NeedsInput,build_scenes,validate_plan,plan_with_model,normalize_plan,planning_claims,enrich_plan,fit_semantic_variants,assign_visual_strategies
 from vktech.export import export_pptx,export_html
 from vktech.opc import Package
 from vktech.audit import audit_scene,repair_scene,contrast
-from vktech.contracts import RepairRequest,GenerateRequest
+from vktech.contracts import PaletteSpec,RepairRequest,GenerateRequest
+from vktech.palette import palette_from_design,recolor_design,recolor_scene,recolor_template
 from vktech.store import Store,Job
 from vktech.worker import execute
 from vktech.selection import choose_variants,compose_scene
@@ -143,6 +144,40 @@ def test_normalized_plan_has_native_visual_quota(plan):
     content_slides=[slide for slide in fixed.slides if slide.role=='content' and not slide.dataset_id and not slide.asset_id]
     native=[slide for slide in content_slides if slide.visual in {'sequence','list','hierarchy'}]
     assert len(native)>=round(len(content_slides)*.4)
+
+
+def test_visual_strategy_prefers_images_only_for_illustrative_concepts(content,plan):
+    draft=plan.model_copy(deep=True)
+    conceptual=draft.slides[1];conceptual.title='Concurrency и parallelism в работе команды';conceptual.message='Практический сценарий показывает работу команды и различие подходов.';conceptual.archetype='illustration'
+    formula=draft.slides[2];formula.title='Доказательство формулы';formula.message='Формула T_P ≥ W/P задаёт нижнюю границу.';formula.archetype='formula'
+    selected=assign_visual_strategies(draft,content,True)
+    assert selected.slides[1].visual_strategy=='generated_image'
+    assert selected.slides[2].visual_strategy!='generated_image'
+
+
+def test_visual_strategy_uses_native_diagram_for_dependencies(content,plan):
+    draft=plan.model_copy(deep=True);target=draft.slides[3]
+    target.title='DAG зависимостей задач';target.message='Граф показывает зависимости и критический путь между задачами.'
+    selected=assign_visual_strategies(draft,content,True).slides[3]
+    assert selected.visual_strategy=='diagram' and selected.visual=='hierarchy'
+
+
+def test_palette_recolors_scene_design_and_template(template_bytes,content,plan):
+    design=import_template(template_bytes);scene=build_scenes(design,content,enrich_plan(plan,content),'palette')[0]
+    palette=PaletteSpec(background='F4F7F4',surface='DCE9E1',accent='0B5D3B',accent_secondary='4D8A68',text_primary='14251D')
+    updated=recolor_scene(scene,design,palette);updated_design=recolor_design(design,palette)
+    assert updated.version==scene.version+1
+    assert updated.slides[0].background==palette.background
+    assert palette.accent in updated_design.palette and updated_design.evidence['palette_override']['accent']==palette.accent
+    package=Package(recolor_template(template_bytes,design,palette))
+    xml=b''.join(value for name,value in package.parts.items() if name.endswith('.xml'))
+    assert b'F4F7F4' in xml or b'DCE9E1' in xml
+
+
+def test_palette_is_inferred_from_template(template_bytes):
+    palette=palette_from_design(import_template(template_bytes))
+    colors=palette.model_dump(exclude={'schema_version'})
+    assert all(len(value)==6 for value in colors.values())
 
 
 def test_candidate_selection_and_composition(template_bytes,content,plan):

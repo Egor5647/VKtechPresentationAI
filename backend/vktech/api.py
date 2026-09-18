@@ -8,7 +8,7 @@ from fastapi import FastAPI,UploadFile,HTTPException,Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from .contracts import GenerateRequest,RepairRequest,SelectionRequest,ExportRequest,RegenerateSlideRequest,DesignIR,ContentIR
+from .contracts import GenerateRequest,RepairRequest,SelectionRequest,ExportRequest,RegenerateSlideRequest,PaletteRequest,DesignIR,ContentIR
 from .template import import_template
 from .content import import_content
 from .settings import artifact_path,ROOT,config
@@ -152,6 +152,15 @@ def recompose(jid:str):
     result=json.loads(parent.result)
     if not result.get('artifacts',{}).get('plan'):raise ValueError('Presentation plan is unavailable')
     return {'id':store().enqueue('recompose',{'parent_job_id':jid})}
+
+
+@app.post('/api/jobs/{jid}/palette',status_code=202)
+def recolor(jid:str,request:PaletteRequest):
+    parent=store().job(jid)
+    if parent.state!='ready':raise HTTPException(409,'Job is not ready')
+    result=json.loads(parent.result);expected=set(result.get('selection',{}))
+    if request.selection is not None and set(request.selection)!=expected:raise HTTPException(422,'Selection must contain every slide exactly once')
+    return {'id':store().enqueue('recolor',{'parent_job_id':jid,'request':request.model_dump()})}
 
 
 @app.post('/api/jobs/{jid}/regenerate-slide',status_code=202)
