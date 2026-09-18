@@ -8,7 +8,7 @@ from PIL import ImageFont
 from .contracts import AuditReport, Issue, ContextualReport, ContextualFailureReport
 
 RULES={
- 'D01':'Элемент вне слайда','D02':'Наложение блоков','D03':'Переполнение текста','D04':'Текст обрезан краем','D05':'Выравнивание по шаблону','D06':'Поля','D07':'Пропорции изображения','D08':'Гарнитуры','D09':'Типографическая шкала','D10':'Палитра','D11':'Происхождение композиции','D12':'Логотип и колонтитул','D13':'Контраст','D14':'Количество пунктов','D15':'Длина пункта','D16':'Размер таблицы','D17':'Количество серий','D18':'Заполнение слайда','D19':'Открываемость','D20':'Заглушки','D21':'Пустой слайд','D22':'Редактируемые объекты','D23':'Подписи диаграммы','D24':'Дублирование слайдов','D25':'Минимальный кегль','D26':'Пустые декоративные контейнеры'}
+ 'D01':'Элемент вне слайда','D02':'Наложение блоков','D03':'Переполнение текста','D04':'Текст обрезан краем','D05':'Выравнивание по шаблону','D06':'Поля','D07':'Пропорции изображения','D08':'Гарнитуры','D09':'Типографическая шкала','D10':'Палитра','D11':'Происхождение композиции','D12':'Логотип и колонтитул','D13':'Контраст','D14':'Количество пунктов','D15':'Длина пункта','D16':'Размер таблицы','D17':'Количество серий','D18':'Заполнение слайда','D19':'Открываемость','D20':'Заглушки','D21':'Пустой слайд','D22':'Редактируемые объекты','D23':'Подписи диаграммы','D24':'Дублирование слайдов','D25':'Минимальный кегль','D26':'Пустые декоративные контейнеры','D27':'Текст пересекает декоративную область шаблона'}
 PLACEHOLDER=re.compile(r'\blorem ipsum\b|\bXXX\b|\bTODO\b|вставьте текст|\[Text\]',re.I)
 
 
@@ -73,6 +73,11 @@ def union_area(boxes):
     return total
 
 
+def template_text_right(prototype):
+    candidates=[s.box.x+s.box.w for s in prototype.slots if s.role in {'body','visual'} and s.box.x<.25 and s.box.y>.28 and .24<s.box.w<.62 and s.box.x+s.box.w<.72]
+    return min(candidates) if candidates else None
+
+
 def audit_scene(scene,design,content,opened=False):
     result=[];seen={};pmap={p.id:p for p in design.prototypes}
     for slide in scene.slides:
@@ -98,7 +103,9 @@ def audit_scene(scene,design,content,opened=False):
                     threshold=3 if n.style.size>=24 or (n.style.size>=18 and n.style.bold) else 4.5
                     if ratio<threshold:add('D13',[n],evidence={'ratio':round(ratio,2),'threshold':threshold,'background_method':'solid color; decoration requires visual check'})
                 if PLACEHOLDER.search(n.text):add('D20',[n],repair='remove_placeholder')
-                minimum=28 if n.role=='title' else 18
+                proto=pmap.get(slide.prototype_id);right=template_text_right(proto) if proto else None
+                cover_text=right is not None and ((n.role=='title' and n.box.y>=.14) or (n.role=='body' and n.box.y>=.5))
+                minimum=24 if cover_text and n.role=='title' else 16 if cover_text else 28 if n.role=='title' else 18
                 if n.style.size<minimum:add('D25',[n],severity='error',evidence={'size':n.style.size,'minimum':minimum})
                 if n.role=='body':
                     lines=n.text.split('\n')
@@ -131,6 +138,11 @@ def audit_scene(scene,design,content,opened=False):
             # Protected objects are copied byte-for-byte, not repositioned by layout.
             add('D12',status='pass',message='Master, layout and footer objects retained by package copy')
             add('D26',status='pass',message='Unused sample placeholders and central decorative containers are removed during export')
+            right=template_text_right(proto)
+            title=next((n for n in slide.nodes if n.role=='title'),None);body=next((n for n in slide.nodes if n.role=='body'),None)
+            if right is not None and title is not None and body is not None and title.box.y>=.14 and body.box.y>=.5:
+                crossing=[n for n in (title,body) if n.box.x+n.box.w>right-.005]
+                if crossing:add('D27',crossing,severity='error',evidence={'safe_right':round(right,3)})
         bounds=[s.box for p in design.prototypes for s in p.slots if s.role in {'body','title'}]
         minx=max(0,min((b.x for b in bounds),default=.03));maxx=min(1,max((b.x+b.w for b in bounds),default=.97))
         for n in slide.nodes:

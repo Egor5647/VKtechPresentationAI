@@ -597,6 +597,16 @@ def body_slots(p):
     return [s for s in p.slots if s.role=='body' and s.box.w>.25 and s.box.h>.1 and 12<=s.style.size<=96]
 
 
+def template_text_right(prototype):
+    """Infer the right edge of a cover text column from a narrow left placeholder.
+
+    Many branded layouts keep a large decorative image on the right while their
+    empty subtitle placeholder marks the safe text column on the left.
+    """
+    candidates=[s.box.x+s.box.w for s in prototype.slots if s.role in {'body','visual'} and s.box.x<.25 and s.box.y>.28 and .24<s.box.w<.62 and s.box.x+s.box.w<.72]
+    return min(candidates) if candidates else None
+
+
 def _scale_size(design, minimum, preferred):
     valid=sorted(s for s in design.font_sizes if s>=minimum and s<=preferred)
     return min(valid,key=lambda s:abs(s-preferred)) if valid else preferred
@@ -727,7 +737,7 @@ def _dark_background(color):
     return contrast('FFFFFF',color)>=3.2
 
 
-def fit_node(node,design):
+def fit_node(node,design,minimum=None):
     """Choose a size from the template scale using measured or conservative metrics.
 
     Missing fonts remain unknown in the audit. Fallback estimates only guide layout.
@@ -735,7 +745,7 @@ def fit_node(node,design):
     from .audit import font_for
     from PIL import ImageFont
     from .settings import ROOT
-    minimum=28 if node.role=='title' else 18
+    minimum=minimum if minimum is not None else 28 if node.role=='title' else 18
     sizes={node.style.size}|{s for s in design.font_sizes if minimum<=s<node.style.size}|{float(minimum)}
     for size in sorted((s for s in sizes if s<=node.style.size),reverse=True):
         font=font_for(node.style.font,max(1,round(size*96/72)))
@@ -752,6 +762,24 @@ def fit_node(node,design):
         if height<=node.box.h:
             node.style.size=size;return
     raise NeedsInput(f'Content does not fit the template slot on {node.id}; reduce text or change composition.')
+
+
+def protect_text_from_template_decor(scene: SceneIR,design: DesignIR) -> SceneIR:
+    """Keep cover text out of decorative template images with matching colors."""
+    result=scene.model_copy(deep=True);prototypes={p.id:p for p in design.prototypes}
+    for slide in result.slides:
+        prototype=prototypes.get(slide.prototype_id);right=template_text_right(prototype) if prototype else None
+        title=next((node for node in slide.nodes if node.role=='title'),None)
+        body=next((node for node in slide.nodes if node.role=='body'),None)
+        cover_like=title is not None and body is not None and title.box.y>=.14 and body.box.y>=.5
+        if right is None or not cover_like:continue
+        title.box.h=max(title.box.h,.40)
+        body.box.y=max(body.box.y,.62);body.box.h=min(body.box.h,.27)
+        for node in (title,body):
+            width=right-node.box.x-.012
+            if width>.25 and node.box.x+node.box.w>right-.005:
+                node.box.w=width;fit_node(node,design,24 if node.role=='title' else 16)
+    return result
 
 
 def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, job_id: str):
@@ -797,9 +825,10 @@ def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, j
                 title_style.size=_scale_size(design,32,title_size);body_style.size=_scale_size(design,18,body_size)
                 title_style.align=body_style.align='left';body_style.bold=True
                 if _dark_background(p.background):title_style.color=body_style.color='FFFFFF'
-                cover_w=.58 if p in branded else .88
-                nodes.append(Node(id=f'{ps.id}-title',kind='text',role='title',box=Box(x=.06,y=.18,w=cover_w,h=.36),style=title_style,text=ps.title))
-                nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=.59,w=cover_w,h=.29),style=body_style,text=lead_text,claim_ids=ps.claim_ids))
+                safe_right=template_text_right(p) if p in branded else None
+                cover_w=max(.25,safe_right-.06-.012) if safe_right else .58 if p in branded else .88
+                nodes.append(Node(id=f'{ps.id}-title',kind='text',role='title',box=Box(x=.06,y=.18,w=cover_w,h=.40),style=title_style,text=ps.title))
+                nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=.62,w=cover_w,h=.27),style=body_style,text=lead_text,claim_ids=ps.claim_ids))
             else:
                 branded_slide=p in branded
                 content_right=.70 if branded_slide else .94
@@ -869,7 +898,7 @@ def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, j
                 visible_parts=[node.text] if node.kind=='text' else list(node.data.get('items',[])) if node.kind=='diagram' else []
                 if any(re.search(r'…|\.\.\.',str(value)) for value in visible_parts):
                     raise NeedsInput(f'Слайд «{ps.title}» содержит незавершённый текст. Перегенерируйте содержание слайда.')
-                if node.kind=='text' and node.text.strip():fit_node(node,design)
+                if node.kind=='text' and node.text.strip():fit_node(node,design,24 if (is_cover or last) and node.role=='title' else 16 if (is_cover or last) else None)
             slides.append(SceneSlide(id=ps.id,title=ps.title,role=ps.role,prototype_id=p.id,background=p.background,nodes=nodes))
         scenes.append(SceneIR(id=f'{job_id}-{variant}',variant=variant,template_id=design.id,content_id=content.id,width=design.width,height=design.height,slides=slides))
     return scenes

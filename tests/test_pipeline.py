@@ -3,11 +3,11 @@ import shutil
 import pytest
 from pptx import Presentation
 from vktech.template import import_template
-from vktech.planning import NeedsInput,build_scenes,validate_plan,plan_with_model,normalize_plan,planning_claims,enrich_plan,fit_semantic_variants,assign_visual_strategies
+from vktech.planning import NeedsInput,build_scenes,validate_plan,plan_with_model,normalize_plan,planning_claims,enrich_plan,fit_semantic_variants,assign_visual_strategies,protect_text_from_template_decor
 from vktech.export import export_pptx,export_html
 from vktech.opc import Package
 from vktech.audit import audit_scene,repair_scene,contrast
-from vktech.contracts import PaletteSpec,RepairRequest,GenerateRequest
+from vktech.contracts import Box,PaletteSpec,RepairRequest,GenerateRequest,SceneIR,Slot,Style
 from vktech.palette import palette_from_design,recolor_design,recolor_scene,recolor_template
 from vktech.store import Store,Job
 from vktech.worker import execute
@@ -178,6 +178,19 @@ def test_palette_is_inferred_from_template(template_bytes):
     palette=palette_from_design(import_template(template_bytes))
     colors=palette.model_dump(exclude={'schema_version'})
     assert all(len(value)==6 for value in colors.values())
+
+
+def test_cover_text_stays_inside_template_safe_column(template_bytes,content,plan):
+    design=import_template(template_bytes);prototype=design.prototypes[0]
+    prototype.slots.append(Slot(id='safe-column',shape_id=999,role='visual',box=Box(x=.05,y=.70,w=.41,h=.08),style=Style()))
+    scene=build_scenes(design,content,enrich_plan(plan,content),'safe-cover')[0]
+    slide=scene.slides[0];slide.prototype_id=prototype.id
+    title=next(node for node in slide.nodes if node.role=='title');body=next(node for node in slide.nodes if node.role=='body')
+    title.box.w=body.box.w=.58
+    repaired=protect_text_from_template_decor(scene,design).slides[0]
+    assert all(node.box.x+node.box.w<.46 for node in repaired.nodes if node.role in {'title','body'})
+    report=audit_scene(SceneIR(id='unsafe',variant='A',template_id=scene.template_id,content_id=scene.content_id,width=scene.width,height=scene.height,slides=[slide]),design,content,opened=True)
+    assert any(issue.rule=='D27' and issue.status=='fail' for issue in report.issues)
 
 
 def test_candidate_selection_and_composition(template_bytes,content,plan):
