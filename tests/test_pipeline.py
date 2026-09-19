@@ -8,12 +8,13 @@ from vktech.planning import NeedsInput,build_scenes,validate_plan,plan_with_mode
 from vktech.export import export_pptx,export_html,_card_font_size
 from vktech.opc import Package
 from vktech.audit import audit_scene,audit_rendered_deck,repair_scene,contrast
-from vktech.contracts import Box,Node,PaletteSpec,RepairRequest,GenerateRequest,PresentationPlan,SceneIR,Slot,Style
+from vktech.contracts import Box,Node,PaletteSpec,RepairRequest,GenerateRequest,PresentationPlan,SceneIR,Slot,Style,ImageSelection,ImageCandidateScore
 from vktech.palette import palette_from_design,recolor_design,recolor_scene,recolor_template
 from vktech.store import Store,Job
 from vktech.worker import execute
 from vktech.selection import choose_variants,compose_scene
 from vktech.settings import artifact_path
+from vktech.pipeline import Pipeline
 from conftest import FixtureGateway
 
 
@@ -185,6 +186,25 @@ def test_visual_strategy_uses_semantic_diagram_for_real_world_model_limit(conten
     enriched=enrich_plan(PresentationPlan(slides=[selected]),content).slides[0]
     assert enriched.visual_contract.goal
     assert 'Общая память' in enriched.visual_contract.entities
+
+
+def test_image_candidates_are_scored_and_best_is_selected(content,plan,monkeypatch):
+    class Gateway:
+        def image(self,prompt,output):Image.new('RGB',(160,90),'white').save(output)
+        def structured(self,role,payload,schema,images=None):
+            assert role=='image_selection' and len(images)==3
+            return ImageSelection(candidates=[
+                ImageCandidateScore(index=i,score=score,semantic_fit=score,naturalness=score,composition=score,accepted=score>=72,reason='Кандидат проверен по смыслу и композиции.')
+                for i,score in enumerate((64,91,77))
+            ],selected_index=1,reason='Второй кандидат лучше раскрывает смысл слайда.')
+    monkeypatch.delenv('LOCAL_MODEL_SEQUENTIAL',raising=False)
+    slide=enrich_plan(PresentationPlan(slides=[plan.slides[1]]),content).slides[0]
+    slide.visual_strategy='generated_image'
+    folder=artifact_path('test-image-candidates');folder.mkdir(parents=True,exist_ok=True)
+    updated=content.model_copy(deep=True)
+    candidates=Pipeline(None,Gateway())._generate_image_candidates(slide,updated,folder,'candidate-test')
+    assert len(candidates)==3 and candidates[1]['selected']
+    assert slide.visual=='image' and slide.asset_id==candidates[1]['asset_id']
 
 
 def test_visual_strategy_uses_image_for_conceptual_transition(content,plan):
