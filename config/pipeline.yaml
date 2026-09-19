@@ -11,3 +11,6 @@ max_upload_bytes: 104857600
 max_archive_bytes: 536870912
 max_archive_entries: 10000
 repair_attempts: 2
+image_candidate_count: 3
+image_candidate_accept_score: 72
+max_generated_image_slides: 4

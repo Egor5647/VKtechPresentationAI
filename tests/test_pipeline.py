@@ -8,7 +8,7 @@ from vktech.planning import NeedsInput,build_scenes,validate_plan,plan_with_mode
 from vktech.export import export_pptx,export_html,_card_font_size
 from vktech.opc import Package
 from vktech.audit import audit_scene,audit_rendered_deck,repair_scene,contrast
-from vktech.contracts import Box,Node,PaletteSpec,RepairRequest,GenerateRequest,SceneIR,Slot,Style
+from vktech.contracts import Box,Node,PaletteSpec,RepairRequest,GenerateRequest,PresentationPlan,SceneIR,Slot,Style
 from vktech.palette import palette_from_design,recolor_design,recolor_scene,recolor_template
 from vktech.store import Store,Job
 from vktech.worker import execute
@@ -175,13 +175,16 @@ def test_visual_strategy_uses_native_diagram_for_dependencies(content,plan):
     assert selected.visual_strategy=='diagram' and selected.visual=='hierarchy'
 
 
-def test_visual_strategy_uses_image_for_real_world_model_limit(content,plan):
+def test_visual_strategy_uses_semantic_diagram_for_real_world_model_limit(content,plan):
     draft=plan.model_copy(deep=True);target=draft.slides[4]
     target.title='Практическая реализация и ограничения PRAM-модели'
     target.message='Реальная система показывает data movement, contention и инфраструктурные ограничения.'
     target.archetype='explanation'
     selected=assign_visual_strategies(draft,content,True).slides[4]
-    assert selected.visual_strategy=='generated_image'
+    assert selected.visual_strategy=='diagram' and selected.visual=='hierarchy'
+    enriched=enrich_plan(PresentationPlan(slides=[selected]),content).slides[0]
+    assert enriched.visual_contract.goal
+    assert 'Общая память' in enriched.visual_contract.entities
 
 
 def test_visual_strategy_uses_image_for_conceptual_transition(content,plan):
@@ -202,6 +205,7 @@ def test_visual_strategy_uses_image_for_conceptual_transition(content,plan):
     ('Greedy scheduler: формула верхней границы','formula_focus'),
     ('Level-by-level scheduler','scheduler'),
     ('Broadcast, reduction и планировщики','comparison'),
+    ('Практическая реализация и ограничения PRAM-модели','pram_reality'),
 ])
 def test_semantic_diagram_layouts(plan,title,expected):
     slide=plan.slides[3].model_copy(deep=True);slide.title=title
@@ -231,6 +235,9 @@ def test_palette_recolors_scene_design_and_template(template_bytes,content,plan)
     assert updated.version==scene.version+1
     assert updated.slides[0].background==palette.background
     assert palette.accent in updated_design.palette and updated_design.evidence['palette_override']['accent']==palette.accent
+    rebuilt=build_scenes(updated_design,content,enrich_plan(plan,content),'palette-rebuild')
+    assert all(node.style.color!='0077FF' for scene in rebuilt for slide in scene.slides for node in slide.nodes)
+    assert all(node.data.get('accent')!='0077FF' for scene in rebuilt for slide in scene.slides for node in slide.nodes if node.kind=='diagram')
     package=Package(recolor_template(template_bytes,design,palette))
     xml=b''.join(value for name,value in package.parts.items() if name.endswith('.xml'))
     assert b'F4F7F4' in xml or b'DCE9E1' in xml

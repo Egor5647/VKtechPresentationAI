@@ -7,7 +7,9 @@ type Option={label:string;preview:string;score:number;reasons:Record<string,unkn
 type Variant='A'|'B'|'C';
 type Format='pptx'|'pdf'|'html';
 type Palette={background:string;surface:string;accent:string;accent_secondary:string;text_primary:string;text_on_accent:string};
-type SlideChoice={id:string;title:string;archetype:string;lead:string;support_points:string[];takeaway:string;visual_strategy?:string;visual_score?:number;visual_reason?:string;selected:Variant;options:Record<Variant,Option>};
+type ImageCandidate={asset_id:string;path:string;score:number;semantic_fit:number;naturalness:number;composition:number;accepted:boolean;reason:string;selected:boolean};
+type VisualContract={goal:string;entities:string[];relations:string[];forbidden:string[]};
+type SlideChoice={id:string;title:string;archetype:string;lead:string;support_points:string[];takeaway:string;visual_strategy?:string;visual_score?:number;visual_reason?:string;visual_contract?:VisualContract;image_candidates?:ImageCandidate[];selected:Variant;options:Record<Variant,Option>};
 type Result={presentation?:Export;variants?:Record<string,Export>;slides?:SlideChoice[];selection?:Record<string,string>;palette?:Palette;source_palette?:Palette;elapsed_seconds?:number;deadline_met?:boolean};
 type Job={id:string;state:string;stage:string;error:string;result:Result};
 type Template={id:string;name:string;design:{prototypes:unknown[];fonts:string[];warnings:string[]}};
@@ -36,7 +38,7 @@ function hue(value:string){const hex=withoutHash(value),r=parseInt(hex.slice(0,2
 function App(){
   const [templates,setTemplates]=useState<Template[]>([]),[contents,setContents]=useState<Content[]>([]);
   const [template,setTemplate]=useState(''),[content,setContent]=useState(''),[brief,setBrief]=useState(''),[count,setCount]=useState(12),[purpose,setPurpose]=useState('project'),[images,setImages]=useState(true);
-  const [job,setJob]=useState<Job|null>(null),[slide,setSlide]=useState(0),[instruction,setInstruction]=useState('Сделай слайд выразительнее и плотнее, сохрани все факты.');
+  const [job,setJob]=useState<Job|null>(null),[slide,setSlide]=useState(0),[instruction,setInstruction]=useState('Сделай слайд выразительнее и плотнее, сохрани все факты.'),[visualInstruction,setVisualInstruction]=useState('Покажи главный смысл без текста и лишних объектов.');
   const [draftSelection,setDraftSelection]=useState<Record<string,Variant>>({}),[exportTask,setExportTask]=useState<{id:string;format:Format}|null>(null);
   const [palette,setPalette]=useState<Palette>(fallbackPalette),[appliedPalette,setAppliedPalette]=useState<Palette>(fallbackPalette),[sourcePalette,setSourcePalette]=useState<Palette>(fallbackPalette);
   const [error,setError]=useState(''),[busy,setBusy]=useState(false),[health,setHealth]=useState<Health|null>(null);
@@ -143,6 +145,17 @@ function App(){
                 {currentChoice.support_points.length>0&&<ul>{currentChoice.support_points.map(point=><li key={point}>{point}</li>)}</ul>}{currentChoice.takeaway&&<p className="takeaway">{currentChoice.takeaway}</p>}
                 <div className="choice-title"><b>Выберите компоновку</b></div>
                 <div className="slide-options">{(['A','B','C'] as const).map(id=>{const option=currentChoice.options[id];return <button key={id} className={selectedFor(currentChoice)===id?'active':''} disabled={busy||Boolean(exportTask)} onClick={()=>setDraftSelection(previous=>({...previous,[currentChoice.id]:id}))}><img src={fileURL(job.id,option.preview)} alt={variantNames[id]}/><span><b>{id} · {variantNames[id]}</b><small>оценка {Math.round(option.score)}/100</small></span></button>})}</div>
+                <div className="visual-editor">
+                  <div className="choice-title"><b>Визуал</b></div>
+                  <div className="visual-modes">
+                    <button disabled={busy} onClick={()=>beginChild('visual',{slide_id:currentChoice.id,mode:'auto',instruction:visualInstruction,selection:completeSelection()})}>Авто</button>
+                    <button className={currentChoice.visual_strategy==='none'?'active':''} disabled={busy} onClick={()=>beginChild('visual',{slide_id:currentChoice.id,mode:'none',selection:completeSelection()})}>Без визуала</button>
+                    <button className={currentChoice.visual_strategy==='diagram'?'active':''} disabled={busy} onClick={()=>beginChild('visual',{slide_id:currentChoice.id,mode:'diagram',selection:completeSelection()})}>Схема</button>
+                    <button className={currentChoice.visual_strategy==='generated_image'?'active':''} disabled={busy||!health?.image_model_configured} onClick={()=>beginChild('visual',{slide_id:currentChoice.id,mode:'image',instruction:visualInstruction,selection:completeSelection()})}>Иллюстрация</button>
+                  </div>
+                  {(currentChoice.image_candidates?.length||0)>0&&<div className="image-candidates">{currentChoice.image_candidates!.map((candidate,index)=><button key={candidate.asset_id} className={candidate.selected?'active':''} title={candidate.reason} disabled={busy} onClick={()=>beginChild('visual',{slide_id:currentChoice.id,mode:'image',candidate_asset_id:candidate.asset_id,selection:completeSelection()})}><img src={fileURL(job.id,candidate.path)} alt={`Вариант иллюстрации ${index+1}`}/><span>{Math.round(candidate.score)}</span></button>)}</div>}
+                  <textarea rows={2} value={visualInstruction} onChange={e=>setVisualInstruction(e.target.value)}/>
+                </div>
                 <div className="regenerate"><label>Что изменить?<textarea rows={3} value={instruction} onChange={e=>setInstruction(e.target.value)}/></label><button className="primary" disabled={busy||Boolean(exportTask)||!instruction.trim()} onClick={()=>beginChild('regenerate-slide',{slide_id:currentChoice.id,instruction,selection:completeSelection()})}>Перегенерировать этот слайд</button></div>
               </aside>
             </div>

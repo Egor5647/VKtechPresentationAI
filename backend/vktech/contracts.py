@@ -89,6 +89,13 @@ class Asset(Contract):
     purpose: Literal["output", "reference"] = "output"
 
 
+class VisualContract(Contract):
+    goal: str = Field(default="", max_length=300)
+    entities: list[str] = Field(default_factory=list, max_length=6)
+    relations: list[str] = Field(default_factory=list, max_length=6)
+    forbidden: list[str] = Field(default_factory=list, max_length=6)
+
+
 class ContentIR(Contract):
     id: str
     title: str
@@ -123,6 +130,7 @@ class PlanSlide(Contract):
     visual_strategy: Literal["none", "generated_image", "source_image", "diagram", "chart", "table"] = "none"
     visual_score: float = Field(default=0, ge=0, le=1)
     visual_reason: str = Field(default="", max_length=240)
+    visual_contract: VisualContract = Field(default_factory=VisualContract)
 
 
 class PresentationPlan(Contract):
@@ -252,6 +260,40 @@ class RegenerateSlideRequest(Contract):
     slide_id: str = Field(min_length=1, max_length=100)
     instruction: str = Field(default="Сделай слайд выразительнее и плотнее, сохрани все факты.", min_length=1, max_length=500)
     selection: dict[str, Literal["A", "B", "C"]] | None = Field(default=None, min_length=1, max_length=50)
+
+
+class VisualUpdateRequest(Contract):
+    slide_id: str = Field(min_length=1, max_length=100)
+    mode: Literal["auto", "none", "diagram", "image"] = "auto"
+    instruction: str = Field(default="", max_length=500)
+    candidate_asset_id: str | None = Field(default=None, max_length=160)
+    selection: dict[str, Literal["A", "B", "C"]] | None = Field(default=None, min_length=1, max_length=50)
+
+
+class ImageCandidateScore(Contract):
+    index: int = Field(ge=0, le=7)
+    score: float = Field(ge=0, le=100)
+    semantic_fit: float = Field(ge=0, le=100)
+    naturalness: float = Field(ge=0, le=100)
+    composition: float = Field(ge=0, le=100)
+    accepted: bool
+    reason: str = Field(min_length=10, max_length=300)
+
+
+class ImageSelection(Contract):
+    candidates: list[ImageCandidateScore] = Field(min_length=1, max_length=8)
+    selected_index: int = Field(ge=0, le=7)
+    fallback_to_diagram: bool = False
+    reason: str = Field(min_length=10, max_length=300)
+
+    @model_validator(mode="after")
+    def selected_exists(self):
+        indices=[candidate.index for candidate in self.candidates]
+        if len(indices)!=len(set(indices)):
+            raise ValueError("candidate indices must be unique")
+        if self.selected_index not in set(indices):
+            raise ValueError("selected_index must identify a scored candidate")
+        return self
 
 
 class SlideRevision(Contract):

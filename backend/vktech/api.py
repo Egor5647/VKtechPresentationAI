@@ -8,7 +8,7 @@ from fastapi import FastAPI,UploadFile,HTTPException,Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from .contracts import GenerateRequest,RepairRequest,SelectionRequest,ExportRequest,RegenerateSlideRequest,PaletteRequest,DesignIR,ContentIR
+from .contracts import GenerateRequest,RepairRequest,SelectionRequest,ExportRequest,RegenerateSlideRequest,VisualUpdateRequest,PaletteRequest,DesignIR,ContentIR
 from .template import import_template
 from .content import import_content
 from .settings import artifact_path,ROOT,config
@@ -173,6 +173,18 @@ def regenerate_slide(jid:str,request:RegenerateSlideRequest):
     return {'id':store().enqueue('regenerate_slide',{'parent_job_id':jid,'request':request.model_dump()})}
 
 
+@app.post('/api/jobs/{jid}/visual',status_code=202)
+def update_visual(jid:str,request:VisualUpdateRequest):
+    parent=store().job(jid)
+    if parent.state!='ready':raise HTTPException(409,'Job is not ready')
+    result=json.loads(parent.result)
+    if request.slide_id not in result.get('selection',{}):raise ValueError('Unknown slide ID')
+    if request.selection is not None and set(request.selection)!=set(result['selection']):raise ValueError('Selection must contain every slide exactly once')
+    if request.mode=='image' and not request.candidate_asset_id and not os.environ.get('T2I_BASE_URL'):
+        raise ValueError('Генерация новых иллюстраций недоступна: T2I endpoint не настроен')
+    return {'id':store().enqueue('regenerate_visual',{'parent_job_id':jid,'request':request.model_dump()})}
+
+
 def job_files(jid):
     j=store().job(jid)
     if j.state!='ready':raise HTTPException(409,'Exports are not ready')
@@ -180,6 +192,7 @@ def job_files(jid):
     for v in result['variants'].values():allowed.update(v[k] for k in ('scene','audit','pptx','pdf','html'));allowed.update(v['previews'])
     if result.get('presentation'):
         v=result['presentation'];allowed.update(v[k] for k in ('scene','audit','pptx','pdf','html'));allowed.update(v['previews'])
+    for candidates in result.get('image_candidates',{}).values():allowed.update(item['path'] for item in candidates)
     return allowed
 
 

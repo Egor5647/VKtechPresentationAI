@@ -122,7 +122,7 @@ class ModelGateway:
     def structured(self, role: str, payload: dict, schema: type[BaseModel], images: list[Path] | None = None):
         if not self.url:
             raise ModelUnavailable("Configure VK_BASE_URL for final or MODEL_BASE_URL for selection. No model was called.")
-        prompt_name={'planning':'plan.txt','vision_audit':'audit.txt','regenerate_slide':'regenerate_slide.txt'}.get(role)
+        prompt_name={'planning':'plan.txt','vision_audit':'audit.txt','regenerate_slide':'regenerate_slide.txt','image_selection':'image_selection.txt'}.get(role)
         if not prompt_name:raise ValueError(f'Unsupported structured role: {role}')
         prompt = (ROOT / "prompts" / prompt_name).read_text()
         output_schema = response_schema(role, payload, schema)
@@ -159,7 +159,7 @@ class ModelGateway:
         url=os.environ.get("T2I_BASE_URL","").rstrip("/")
         if not url: raise ModelUnavailable("T2I_BASE_URL is required for image generation")
         key=os.environ.get("T2I_API_KEY","")
-        size=f"{os.environ.get('T2I_WIDTH','1024')}x{os.environ.get('T2I_HEIGHT','1024')}"
+        size=f"{os.environ.get('T2I_WIDTH','1344')}x{os.environ.get('T2I_HEIGHT','768')}"
         model=os.environ.get('T2I_MODEL') or self.manifest['image']['repository']
         cache=self._cache_path('images',[model.encode(),size.encode(),prompt.encode()],'png')
         if self.cache_enabled and cache.exists():

@@ -4,7 +4,7 @@ import logging
 import os
 import re
 from .settings import artifact_path
-from .contracts import PresentationPlan, ContentIR, DesignIR, SceneIR, SceneSlide, Node, Style, Box, SlideRevision
+from .contracts import PresentationPlan, ContentIR, DesignIR, SceneIR, SceneSlide, Node, Style, Box, SlideRevision, VisualContract
 
 log=logging.getLogger(__name__)
 
@@ -312,6 +312,9 @@ def assign_visual_strategies(plan: PresentationPlan,content: ContentIR,allow_gen
         if re.search(r'от\s+конкурент\w*\s+код\w*\s+к\s+(?:абстракт|модел)',text,re.I):
             slide.asset_id=None;slide.visual='sequence';slide.visual_strategy='diagram';slide.visual_score=.96
             slide.visual_reason='Переход между двумя представлениями точнее показывает редактируемая схема.';continue
+        if re.search(r'(?:практическ\w*\s+реализац\w*.*\bpram\b|\bpram\b.*(?:ограничен|реальн\w*\s+систем)|contention|scheduler\s+overhead)',text,re.I):
+            slide.asset_id=None;slide.visual='hierarchy';slide.visual_strategy='diagram';slide.visual_score=.98
+            slide.visual_reason='Различие между моделью PRAM и реальной системой точнее показывает редактируемая схема.';continue
         if slide.role in {'cover','divider'} or index in {0,last}:
             slide.visual='none';slide.visual_strategy='none';slide.visual_score=.95;slide.visual_reason='Оформление шаблона уже выполняет визуальную функцию этого слайда.';continue
         score=.18
@@ -345,6 +348,22 @@ def assign_visual_strategies(plan: PresentationPlan,content: ContentIR,allow_gen
             # producing a valid deck without a missing asset.
             slide.visual='none'
     return result
+
+
+def visual_contract_for(slide) -> VisualContract:
+    """Describe what a visual must communicate and what it must avoid."""
+    layout=_diagram_layout(slide)
+    presets={
+        'pram_reality':(
+            'Сравнить идеальную PRAM с ограничениями реальной многоядерной системы.',
+            ['Процессоры','Общая память','Кэши','Межсоединение','Планировщик'],
+            ['В PRAM доступ считается одношаговым','В реальной системе возникают задержки и конкуренция'],
+        ),
+        'reduction_tree':('Показать пошаговое сокращение числа элементов.',['Входы','Пары','Результат'],['Каждый уровень объединяет пары']),
+        'fork_join':('Показать разветвление и синхронизацию задач.',['Fork','Параллельные задачи','Join'],['Ветви выходят из Fork и сходятся в Join']),
+    }
+    goal,entities,relations=presets.get(layout,(slide.visual_brief or slide.message,slide.visual_items[:3],[slide.takeaway] if slide.takeaway else []))
+    return VisualContract(goal=_complete_excerpt(goal,300),entities=[_complete_excerpt(v,80) for v in entities[:6]],relations=[_complete_excerpt(v,100) for v in relations[:6]],forbidden=['Неподписанные устройства','Случайные провода и блоки','Текст внутри растровой иллюстрации','Логотипы и водяные знаки'])
 
 
 def _archetype(slide,index=0,count=1):
@@ -382,6 +401,7 @@ def enrich_plan(plan: PresentationPlan,content: ContentIR) -> PresentationPlan:
             slide.visual_brief=_complete_excerpt(slide.title+': '+slide.message,260)
         else:slide.visual_brief=_complete_excerpt(slide.visual_brief,260)
         slide.message=_clean_text(slide.message)
+        slide.visual_contract=visual_contract_for(slide)
     return result
 
 
@@ -772,6 +792,7 @@ def _diagram_layout(ps) -> str:
     groups=sum(bool(re.search(pattern,title)) for pattern in (r'broadcast',r'редукц|reduction',r'scheduler|планиров'))
     if groups>=2:return 'comparison'
     if re.search(r'от\s+конкурент\w*\s+код\w*\s+к\s+(?:абстракт|модел)',title):return 'abstraction'
+    if re.search(r'(?:практическ\w*\s+реализац\w*.*\bpram\b|\bpram\b.*(?:ограничен|реальн\w*\s+систем)|contention|scheduler\s+overhead)',text):return 'pram_reality'
     if re.search(r'редукц|reduction|бинарн\w* дерев',title):return 'reduction_tree'
     if re.search(r'erew|crew|crcw|режим\w* доступ|set\s*\(',title):return 'memory_access'
     if re.search(r'fork.?join|разветв\w*.*объедин',title) and 'broadcast' not in title:return 'fork_join'
@@ -870,8 +891,9 @@ def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, j
     style_proto=plain[0]
     style_title=next(s for s in style_proto.slots if s.role=='title')
     style_body=max(body_slots(style_proto),key=lambda s:s.box.w*s.box.h).style
-    surface='EBF3F9' if 'EBF3F9' in design.palette else 'E8EEF6'
-    accent=next((c for c in ('0077FF','2688EB','005FF9') if c in design.palette),'0077FF')
+    palette_override=design.evidence.get('palette_override',{})
+    surface=palette_override.get('surface') or ('EBF3F9' if 'EBF3F9' in design.palette else 'E8EEF6')
+    accent=palette_override.get('accent') or next((c for c in ('0077FF','2688EB','005FF9') if c in design.palette),'0077FF')
     scenes=[]
     for vi,variant in enumerate(('A','B','C')):
         slides=[]
@@ -881,7 +903,7 @@ def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, j
             last=si==len(plan.slides)-1
             if (is_cover or last) and dark:
                 p=dark[(si+vi)%len(dark)]
-            elif variant=='A' and dark and (ps.role=='divider' or si%6==4):
+            elif variant=='A' and dark and (ps.role=='divider' or (si%6==4 and visual=='none')):
                 # The concise mode doubles as an editorial emphasis layout. A
                 # periodic branded background keeps long decks from becoming a
                 # sequence of nearly identical pale pages.
@@ -891,8 +913,6 @@ def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, j
             elif ps.role=='divider' and (light or dark):
                 pool=light or dark;p=pool[(si+vi)%len(pool)]
             elif visual=='none' and (content_light or light):
-                pool=content_light or light;p=pool[(si+vi)%len(pool)]
-            elif visual in {'sequence','list','hierarchy'} and (content_light or light) and (si+vi)%2==0:
                 pool=content_light or light;p=pool[(si+vi)%len(pool)]
             else:
                 p=plain[(si+vi)%min(3,len(plain))]

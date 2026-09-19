@@ -79,7 +79,38 @@ def _diagram(out,node,xywh):
         fitted=_card_font_size(node,tw,th,value,minimum=12)
         p.font.size=Pt(min(fitted,size or fitted));p.font.bold=bold;p.font.color.rgb=RGBColor.from_string(color)
         return shape
-    if layout=='abstraction':
+    if layout=='pram_reality':
+        # A semantic, fully editable comparison.  The labels are part of the
+        # diagram grammar, so the renderer never asks a raster model to invent
+        # hardware topology or technical text.
+        half=round(w*.43);arrow_w=round(w*.08);header_h=round(h*.14)
+        flat_text(x,y,half,header_h,'Идеальная PRAM',f'{node.id}-ideal-title',accent,True,size=19)
+        flat_text(x+w-half,y,half,header_h,'Реальная система',f'{node.id}-real-title',accent,True,size=19)
+        proc_y=y+round(h*.22);proc_h=round(h*.17);proc_gap=round(half*.025);proc_w=(half-2*proc_gap)//3
+        for i in range(3):
+            px=x+i*(proc_w+proc_gap)
+            _card(out,node,px,proc_y,proc_w,proc_h,f'P{i+1}',f'{node.id}-ideal-p-{i+1}',surface,dark,True)
+        memory_y=y+round(h*.63);memory_h=round(h*.22)
+        for i in range(3):connector(x+i*(proc_w+proc_gap)+proc_w//2,proc_y+proc_h,x+half//2,memory_y,i+1)
+        _card(out,node,x,memory_y,half,memory_h,'Общая память\nдоступ за один шаг',f'{node.id}-ideal-memory',accent,white,True)
+        chevron=out.shapes.add_shape(MSO_SHAPE.CHEVRON,x+half+round(w*.015),y+round(h*.40),arrow_w,round(h*.18))
+        chevron.name=f'{node.id}-reality-arrow';chevron.fill.solid();chevron.fill.fore_color.rgb=RGBColor.from_string(accent);chevron.line.fill.background()
+        rx=x+w-half;cache_y=y+round(h*.36);cache_h=round(h*.14)
+        for i in range(3):
+            px=rx+i*(proc_w+proc_gap)
+            _card(out,node,px,proc_y,proc_w,proc_h,f'Ядро {i+1}',f'{node.id}-core-{i+1}',surface,dark,True)
+            _card(out,node,px,cache_y,proc_w,cache_h,'Кэш',f'{node.id}-cache-{i+1}',surface,dark)
+            connector(px+proc_w//2,proc_y+proc_h,px+proc_w//2,cache_y,i+10)
+        bus_y=y+round(h*.62)
+        for i in range(3):
+            px=rx+i*(proc_w+proc_gap)
+            connector(px+proc_w//2,cache_y+cache_h,px+proc_w//2,bus_y,i+30)
+        connector(rx,bus_y,rx+half,bus_y,20)
+        flat_text(rx,y+round(h*.51),half,round(h*.08),'Межсоединение · конкуренция',f'{node.id}-bus-label',accent,True,size=14)
+        real_mem_y=y+round(h*.75)
+        connector(rx+half//2,bus_y,rx+half//2,real_mem_y,21)
+        _card(out,node,rx,real_mem_y,half,round(h*.16),'Память · задержки · overhead',f'{node.id}-real-memory',accent,white,True)
+    elif layout=='abstraction':
         column_w=round(w*.38);arrow_w=round(w*.10);top_y=y+round(h*.08);label_h=round(h*.38)
         flat_text(x,top_y,column_w,label_h,'Concurrent-код\nСобытия и shared state',f'{node.id}-code',dark,True,size=19)
         flat_text(x+w-column_w,top_y,column_w,label_h,'Параллельный алгоритм\nWork и Span',f'{node.id}-model',dark,True,size=19)
