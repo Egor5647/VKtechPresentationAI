@@ -294,8 +294,8 @@ def normalize_plan(plan: PresentationPlan) -> PresentationPlan:
 
 def assign_visual_strategies(plan: PresentationPlan,content: ContentIR,allow_generated: bool) -> PresentationPlan:
     """Choose the visual medium from slide semantics instead of a fixed image quota."""
-    result=plan.model_copy(deep=True);last=len(result.slides)-1
-    image_words=re.compile(r'сценар|ситуац|пользоват|клиент|команд|человек|продукт|интерфейс|экосистем|инфраструктур|реальн\w* систем|практическ\w* контекст|concurrency.+parallelism',re.I)
+    result=plan.model_copy(deep=True);last=len(result.slides)-1;assets={asset.id:asset for asset in content.assets}
+    image_words=re.compile(r'сценар|ситуац|пользоват|клиент|команд|человек|продукт|интерфейс|экосистем|инфраструктур|реальн\w* систем|практическ\w* контекст',re.I)
     formula_words=re.compile(r'формул|доказ|теорем|границ|[≤≥=]|θ\s*\(|\bo\s*\(',re.I)
     hierarchy_words=re.compile(r'\bdag\b|граф|зависим|иерарх|архитектур',re.I)
     sequence_words=re.compile(r'этап|алгоритм|процесс|fork.?join|редукц|scheduler|планиров|broadcast|parallel for|цикл',re.I)
@@ -303,10 +303,15 @@ def assign_visual_strategies(plan: PresentationPlan,content: ContentIR,allow_gen
     conceptual_words=re.compile(r'от\s+конкурент\w*\s+код\w*\s+к\s+абстракт|практическ\w*\s+реализац|инженерн\w*\s+(?:контекст|систем)|пользовательск\w*\s+сценар',re.I)
     for index,slide in enumerate(result.slides):
         text=' '.join((slide.title,slide.message,slide.visual_brief)).lower()
+        generated_asset=assets.get(slide.asset_id) if slide.asset_id else None
+        if generated_asset and not generated_asset.source.startswith('Z-Image'):generated_asset=None
         if slide.dataset_id:
             slide.visual_strategy='table' if slide.visual=='table' else 'chart';slide.visual_score=1;slide.visual_reason='Числовые данные точнее передаются нативной диаграммой или таблицей.';continue
-        if slide.asset_id:
+        if slide.asset_id and not generated_asset:
             slide.visual='image';slide.visual_strategy='source_image';slide.visual_score=1;slide.visual_reason='В материалах есть связанное исходное изображение.';continue
+        if re.search(r'от\s+конкурент\w*\s+код\w*\s+к\s+(?:абстракт|модел)',text,re.I):
+            slide.asset_id=None;slide.visual='sequence';slide.visual_strategy='diagram';slide.visual_score=.96
+            slide.visual_reason='Переход между двумя представлениями точнее показывает редактируемая схема.';continue
         if slide.role in {'cover','divider'} or index in {0,last}:
             slide.visual='none';slide.visual_strategy='none';slide.visual_score=.95;slide.visual_reason='Оформление шаблона уже выполняет визуальную функцию этого слайда.';continue
         score=.18
@@ -323,14 +328,16 @@ def assign_visual_strategies(plan: PresentationPlan,content: ContentIR,allow_gen
         if native_kind and not conceptual_words.search(text):score-=.24
         score=max(0,min(1,score))
         if score>=.68:
-            slide.visual='none';slide.visual_strategy='generated_image';slide.visual_score=round(score,2)
+            slide.visual='image' if generated_asset else 'none';slide.visual_strategy='generated_image';slide.visual_score=round(score,2)
             slide.visual_reason='Слайд описывает ситуацию или концептуальное различие, которое полезно показать иллюстрацией.'
         elif native_kind:
+            if generated_asset:slide.asset_id=None
             slide.visual=native_kind;slide.visual_strategy='diagram';slide.visual_score=.9
             slide.visual_reason='Связи и последовательность точнее показываются редактируемой нативной схемой.'
         elif slide.visual in {'sequence','list','hierarchy'}:
             slide.visual_strategy='diagram';slide.visual_score=.72;slide.visual_reason='Планировщик выбрал нативную схему для структурирования тезисов.'
         else:
+            if generated_asset:slide.asset_id=None
             slide.visual='none';slide.visual_strategy='none';slide.visual_score=.76
             slide.visual_reason='Отдельная иллюстрация не добавляет смысла к тексту или формуле.'
         if slide.visual_strategy=='generated_image' and not allow_generated:
@@ -358,6 +365,10 @@ def enrich_plan(plan: PresentationPlan,content: ContentIR) -> PresentationPlan:
     """Add a source-backed editorial structure used by the layout director."""
     result=plan.model_copy(deep=True);claims={c.id:c for c in content.claims}
     for index,slide in enumerate(result.slides):
+        if re.search(r'\*\*s\b|\bпараллельного\s+s\b',slide.message,re.I):
+            slide.takeaway='Work и Span задают независимые нижние границы времени.'
+            slide.balanced_message='Work и Span задают нижние границы: T_P ≥ W/P и T_P ≥ S.'
+            slide.message='Work W измеряет весь объём задач, а Span S — длину критического пути. Поэтому время выполнения ограничено снизу: T_P ≥ W/P и T_P ≥ S.'
         slide.archetype=_archetype(slide,index,len(result.slides))
         if not slide.support_points:slide.support_points=_supporting_points(slide,claims,3)
         slide.support_points=[_clean_text(point) for point in slide.support_points[:3] if point.strip()]
@@ -677,6 +688,7 @@ def _style(base,design,background,role='body',align='left'):
 
 
 def _clean_text(value):
+    value=re.sub(r'\*{2,}|`+','',value)
     return re.sub(r'\s+',' ',value).strip(' •–—-')
 
 
@@ -759,10 +771,13 @@ def _diagram_layout(ps) -> str:
     title=ps.title.lower();text=' '.join((ps.title,ps.message,ps.visual_brief)).lower()
     groups=sum(bool(re.search(pattern,title)) for pattern in (r'broadcast',r'редукц|reduction',r'scheduler|планиров'))
     if groups>=2:return 'comparison'
+    if re.search(r'от\s+конкурент\w*\s+код\w*\s+к\s+(?:абстракт|модел)',title):return 'abstraction'
     if re.search(r'редукц|reduction|бинарн\w* дерев',title):return 'reduction_tree'
     if re.search(r'erew|crew|crcw|режим\w* доступ|set\s*\(',title):return 'memory_access'
     if re.search(r'fork.?join|разветв\w*.*объедин',title) and 'broadcast' not in title:return 'fork_join'
-    if re.search(r'work\s+и\s+span|critical path|критическ\w* путь|2-аппроксимац',title):return 'critical_path'
+    if re.search(r'2-аппроксимац|level.by.level.+(?:границ|доказ)',title):return 'level_bound'
+    if re.search(r'work\s+и\s+span',title):return 'work_span'
+    if re.search(r'critical path|критическ\w* путь',title):return 'critical_path'
     if re.search(r'формул|неравен|верхн\w* границ|нижн\w* границ',title):return 'formula_focus'
     if re.search(r'scheduler|планиров|work stealing|очеред',title):return 'scheduler'
     if re.search(r'разделен\w* сло|три слоя|уровн\w* абстракц',text):return 'layers'

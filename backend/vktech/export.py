@@ -71,7 +71,26 @@ def _diagram(out,node,xywh):
         shape=out.shapes.add_shape(MSO_SHAPE.OVAL,cx-size//2,cy-size//2,size,size)
         shape.name=f'{node.id}-node-{index}';shape.fill.solid();shape.fill.fore_color.rgb=RGBColor.from_string(accent if highlight else surface)
         shape.line.color.rgb=RGBColor.from_string(accent);shape.line.width=Pt(1.4)
-    if layout=='layers':
+    def flat_text(tx,ty,tw,th,value,name,color=dark,bold=False,align=PP_ALIGN.CENTER,size=None):
+        shape=out.shapes.add_textbox(tx,ty,tw,th);shape.name=name
+        tf=shape.text_frame;tf.clear();tf.word_wrap=True;tf.vertical_anchor=MSO_ANCHOR.MIDDLE
+        tf.margin_left=tf.margin_right=Pt(3);tf.margin_top=tf.margin_bottom=Pt(2)
+        p=tf.paragraphs[0];p.text=value;p.alignment=align;p.font.name=node.style.font
+        fitted=_card_font_size(node,tw,th,value,minimum=12)
+        p.font.size=Pt(min(fitted,size or fitted));p.font.bold=bold;p.font.color.rgb=RGBColor.from_string(color)
+        return shape
+    if layout=='abstraction':
+        column_w=round(w*.38);arrow_w=round(w*.10);top_y=y+round(h*.08);label_h=round(h*.38)
+        flat_text(x,top_y,column_w,label_h,'Concurrent-код\nСобытия и shared state',f'{node.id}-code',dark,True,size=19)
+        flat_text(x+w-column_w,top_y,column_w,label_h,'Параллельный алгоритм\nWork и Span',f'{node.id}-model',dark,True,size=19)
+        arrow=out.shapes.add_shape(MSO_SHAPE.CHEVRON,x+(w-arrow_w)//2,top_y+round(label_h*.28),arrow_w,round(label_h*.44))
+        arrow.name=f'{node.id}-transition';arrow.fill.solid();arrow.fill.fore_color.rgb=RGBColor.from_string(accent);arrow.line.fill.background()
+        metric='Полезный параллелизм W/S'
+        line_y=y+round(h*.62)
+        line=out.shapes.add_connector(MSO_CONNECTOR.STRAIGHT,x+round(w*.12),line_y,x+round(w*.88),line_y)
+        line.name=f'{node.id}-metric-line';line.line.color.rgb=RGBColor.from_string(accent);line.line.width=Pt(2)
+        flat_text(x+round(w*.12),line_y+round(h*.04),round(w*.76),round(h*.24),metric,f'{node.id}-metric',accent,True,size=19)
+    elif layout=='layers':
         count=len(items);ch=(h-vgap*(count-1))//count
         for i,item in enumerate(items):
             inset=round(i*w*.045);_card(out,node,x+inset,y+i*(ch+vgap),w-2*inset,ch,item,f'{node.id}-layer-{i+1}',accent if i==0 else surface,white if i==0 else dark,i==0)
@@ -82,30 +101,47 @@ def _diagram(out,node,xywh):
             _card(out,node,x+i*(cw+gap),y,cw,card_h,item,f'{node.id}-compare-{i+1}',accent if i==0 else surface,white if i==0 else dark,i==0)
         if bottom:_card(out,node,x+round(w*.08),y+card_h+vgap,w-round(w*.16),h-card_h-vgap,bottom[0],f'{node.id}-compare-3',surface,dark)
     elif layout=='fork_join':
-        top_h=round(h*.22);bottom_h=top_h;middle_y=y+round(h*.38);middle_h=round(h*.22)
-        _card(out,node,x+round(w*.24),y,round(w*.52),top_h,items[0],f'{node.id}-fork',accent,white,True)
-        branch_count=3
-        for i in range(branch_count):
-            label=items[1] if len(items)>1 and i==1 else ''
-            branch_w=round(w*(.32 if label else .16))
-            bx=x+round(w*((.07,.34,.77)[i]));connector(x+w//2,y+top_h,bx+branch_w//2,middle_y,i+1)
-            if label:_card(out,node,bx,middle_y,branch_w,middle_h,label,f'{node.id}-branch-{i+1}',surface,dark)
-            else:
-                sh=out.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,bx,middle_y,branch_w,middle_h);sh.name=f'{node.id}-branch-{i+1}';sh.fill.solid();sh.fill.fore_color.rgb=RGBColor.from_string(surface);sh.line.color.rgb=RGBColor.from_string(accent)
-            connector(bx+branch_w//2,middle_y+middle_h,x+w//2,y+h-bottom_h,i+10)
-        _card(out,node,x+round(w*.24),y+h-bottom_h,round(w*.52),bottom_h,items[-1],f'{node.id}-join',accent,white,True)
+        size=max(Pt(24),min(round(w*.13),round(h*.16)));top_c=(x+w//2,y+round(h*.16));middle_y=y+round(h*.50);bottom_c=(x+w//2,y+round(h*.84))
+        centers=[(x+round(w*.20),middle_y),(x+round(w*.50),middle_y),(x+round(w*.80),middle_y)]
+        for i,(cx,cy) in enumerate(centers):connector(top_c[0],top_c[1]+size//2,cx,cy-size//2,i+1);connector(cx,cy+size//2,bottom_c[0],bottom_c[1]-size//2,i+10)
+        dot(*top_c,size,0,True);dot(*bottom_c,size,9,True)
+        for i,(cx,cy) in enumerate(centers):
+            dot(cx,cy,size,i+1,False);flat_text(cx-size//2,cy-size//2,size,size,str(i+1),f'{node.id}-branch-label-{i+1}',dark,True,size=14)
+        flat_text(x+round(w*.04),y,round(w*.30),round(h*.22),'Fork',f'{node.id}-fork-label',accent,True,size=20)
+        flat_text(x+round(w*.04),y+round(h*.76),round(w*.30),round(h*.22),'Join',f'{node.id}-join-label',accent,True,size=20)
+        flat_text(x+round(w*.62),y+round(h*.66),round(w*.34),round(h*.24),'Ready после предшественников',f'{node.id}-ready-label',dark,False,size=15)
     elif layout=='reduction_tree':
-        levels=(4,2,1);ys=(y+round(h*.78),y+round(h*.42),y+round(h*.08));size=max(Pt(18),min(round(w*.10),round(h*.14)))
+        tree_x=x+round(w*.40);tree_w=round(w*.58);levels=(4,2,1);ys=(y+round(h*.78),y+round(h*.44),y+round(h*.12));size=max(Pt(18),min(round(tree_w*.14),round(h*.13)))
         level_centers=[]
         for row,count in enumerate(levels):
-            centers=[x+round((i+1)*w/(count+1)) for i in range(count)];level_centers.append(centers)
+            centers=[tree_x+round((i+1)*tree_w/(count+1)) for i in range(count)];level_centers.append(centers)
             for i,cx in enumerate(centers):dot(cx,ys[row],size,row*10+i,row==2)
         for child_row in (0,1):
             for i,cx in enumerate(level_centers[child_row]):
                 parent=level_centers[child_row+1][i//2];connector(cx,ys[child_row]-size//2,parent,ys[child_row+1]+size//2,30+child_row*10+i)
-        label_h=round(h*.16)
-        for i,item in enumerate(items[:3]):
-            _card(out,node,x+round(w*.03),y+round(h*(.82-i*.35)),round(w*.40),label_h,item,f'{node.id}-level-label-{i+1}',accent if i==2 else surface,white if i==2 else dark,i==2)
+        labels=('1. Копирование A в B','2. Попарное сложение','Сумма блока 2^h')
+        label_h=round(h*.20);label_ys=(y+round(h*.69),y+round(h*.36),y+round(h*.03))
+        for i,item in enumerate(labels):flat_text(x,label_ys[i],round(w*.34),label_h,item,f'{node.id}-level-label-{i+1}',accent if i==2 else dark,i==2,PP_ALIGN.LEFT,size=16)
+    elif layout=='work_span':
+        graph_w=round(w*.62);positions=[(.10,.76),(.35,.52),(.35,.84),(.60,.38),(.60,.68),(.88,.28),(.88,.58)]
+        edges=((0,1),(0,2),(1,3),(1,4),(2,4),(3,5),(4,5),(4,6));critical={0,1,4,5};size=max(Pt(18),min(round(graph_w*.11),round(h*.12)))
+        for i,(a,b) in enumerate(edges):connector(x+round(positions[a][0]*graph_w),y+round(positions[a][1]*h),x+round(positions[b][0]*graph_w),y+round(positions[b][1]*h),i+1)
+        for i,(px,py) in enumerate(positions):dot(x+round(px*graph_w),y+round(py*h),size,i,i in critical)
+        label_x=x+round(w*.66);label_w=round(w*.33)
+        flat_text(label_x,y+round(h*.12),label_w,round(h*.24),items[0],f'{node.id}-work-label',dark,True,size=17)
+        flat_text(label_x,y+round(h*.40),label_w,round(h*.24),items[1] if len(items)>1 else 'Span = критический путь',f'{node.id}-span-label',accent,True,size=17)
+        if len(items)>2:flat_text(x+round(w*.08),y+round(h*.86),round(w*.84),round(h*.13),items[2],f'{node.id}-bound',accent,True,size=18)
+    elif layout=='level_bound':
+        row_ys=(y+round(h*.17),y+round(h*.43),y+round(h*.69));counts=(2,3,2);size=max(Pt(16),min(round(w*.10),round(h*.10)))
+        for row,(cy,count) in enumerate(zip(row_ys,counts)):
+            flat_text(x,cy-round(h*.08),round(w*.25),round(h*.16),f'Уровень {row+1}',f'{node.id}-level-{row+1}',dark,True,PP_ALIGN.LEFT,size=15)
+            centers=[x+round(w*(.43+i*.19)) for i in range(count)]
+            for i,cx in enumerate(centers):dot(cx,cy,size,row*10+i,row==0)
+            if row:
+                previous=[x+round(w*(.43+i*.19)) for i in range(counts[row-1])]
+                for i,cx in enumerate(centers):connector(previous[min(i,len(previous)-1)],row_ys[row-1]+size//2,cx,cy-size//2,30+row*10+i)
+        formula=items[2] if len(items)>2 else 'T_level ≤ 2T*'
+        flat_text(x+round(w*.18),y+round(h*.82),round(w*.70),round(h*.17),formula,f'{node.id}-level-bound',accent,True,size=18)
     elif layout=='critical_path':
         positions=[(.10,.72),(.30,.50),(.50,.68),(.70,.35),(.90,.18)];size=max(Pt(18),min(round(w*.10),round(h*.14)))
         for i,((ax,ay),(bx,by)) in enumerate(zip(positions,positions[1:]),1):connector(x+round(ax*w),y+round(ay*h),x+round(bx*w),y+round(by*h),i)

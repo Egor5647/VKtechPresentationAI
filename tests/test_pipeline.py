@@ -128,6 +128,18 @@ def test_density_fit_removes_repeated_sentences_and_repairs_pdf_formula(plan):
     assert len(fitted.takeaway)<len(fitted.balanced_message)<len(fitted.message)
 
 
+def test_editorial_cleanup_preserves_mathematical_optimum_marker(content,plan):
+    draft=plan.model_copy(deep=True);draft.slides[1].message='Граница T_level ≤ 2T* сохраняется.'
+    assert '2T*' in enrich_plan(draft,content).slides[1].message
+
+
+def test_editorial_cleanup_repairs_broken_work_span_density_modes(content,plan):
+    draft=plan.model_copy(deep=True);draft.slides[1].message='Границы для любого параллельного **s.'
+    fixed=enrich_plan(draft,content).slides[1]
+    assert '**s' not in fixed.message and 'T_P ≥ W/P' in fixed.message
+    assert len(fixed.takeaway)<len(fixed.balanced_message)<len(fixed.message)
+
+
 def test_plan_rejects_invented_optimization_direction(content,plan):
     broken=plan.model_copy(deep=True);broken.slides[0].message='Сначала необходимо максимизировать показатель, а затем продолжить вычисление.'
     with pytest.raises(ValueError,match='optimization direction'):validate_plan(broken,content,12)
@@ -178,13 +190,15 @@ def test_visual_strategy_uses_image_for_conceptual_transition(content,plan):
     target.message='Абстрактный алгоритм отделяет полезный параллелизм от деталей потоков.'
     target.visual_brief='Переход от сложного кода к ясной модели.';target.archetype='process'
     selected=assign_visual_strategies(draft,content,True).slides[1]
-    assert selected.visual_strategy=='generated_image'
+    assert selected.visual_strategy=='diagram' and selected.visual=='sequence'
 
 
 @pytest.mark.parametrize(('title','expected'),[
     ('Бинарная редукция в EREW','reduction_tree'),
     ('Fork-Join и DAG вычислений','fork_join'),
-    ('Work и Span: критический путь','critical_path'),
+    ('От конкурентного кода к абстрактной модели','abstraction'),
+    ('Work и Span: критический путь','work_span'),
+    ('Level-by-level scheduler: доказательство 2-аппроксимации','level_bound'),
     ('Greedy scheduler: формула верхней границы','formula_focus'),
     ('Level-by-level scheduler','scheduler'),
     ('Broadcast, reduction и планировщики','comparison'),

@@ -98,6 +98,7 @@ class Pipeline:
             write_json(folder/'plan.json',plan.model_dump());scenes=build_scenes(design,content,plan,job.id)
         elif recompose:
             validate_plan(plan,content,original.slide_count)
+            plan=assign_visual_strategies(plan,content,original.generate_images)
             plan=enrich_plan(plan,content);write_json(folder/'plan.json',plan.model_dump());scenes=build_scenes(design,content,plan,job.id)
         else:
             before=time.monotonic();plan=plan_with_model(self.gateway,content,original);timings['planning']=time.monotonic()-before
