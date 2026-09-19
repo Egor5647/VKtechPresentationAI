@@ -312,9 +312,6 @@ def assign_visual_strategies(plan: PresentationPlan,content: ContentIR,allow_gen
         if re.search(r'от\s+конкурент\w*\s+код\w*\s+к\s+(?:абстракт|модел)',text,re.I):
             slide.asset_id=None;slide.visual='sequence';slide.visual_strategy='diagram';slide.visual_score=.96
             slide.visual_reason='Переход между двумя представлениями точнее показывает редактируемая схема.';continue
-        if re.search(r'(?:практическ\w*\s+реализац\w*.*\bpram\b|\bpram\b.*(?:ограничен|реальн\w*\s+систем)|contention|scheduler\s+overhead)',text,re.I):
-            slide.asset_id=None;slide.visual='hierarchy';slide.visual_strategy='diagram';slide.visual_score=.98
-            slide.visual_reason='Различие между моделью PRAM и реальной системой точнее показывает редактируемая схема.';continue
         if slide.role in {'cover','divider'} or index in {0,last}:
             slide.visual='none';slide.visual_strategy='none';slide.visual_score=.95;slide.visual_reason='Оформление шаблона уже выполняет визуальную функцию этого слайда.';continue
         score=.18
@@ -792,7 +789,7 @@ def _diagram_layout(ps) -> str:
     groups=sum(bool(re.search(pattern,title)) for pattern in (r'broadcast',r'редукц|reduction',r'scheduler|планиров'))
     if groups>=2:return 'comparison'
     if re.search(r'от\s+конкурент\w*\s+код\w*\s+к\s+(?:абстракт|модел)',title):return 'abstraction'
-    if re.search(r'(?:практическ\w*\s+реализац\w*.*\bpram\b|\bpram\b.*(?:ограничен|реальн\w*\s+систем)|contention|scheduler\s+overhead)',text):return 'pram_reality'
+    if re.search(r'^практическ\w*\s+реализац\w*\s+и\s+ограничен\w*\s+pram',title):return 'pram_reality'
     if re.search(r'редукц|reduction|бинарн\w* дерев',title):return 'reduction_tree'
     if re.search(r'erew|crew|crcw|режим\w* доступ|set\s*\(',title):return 'memory_access'
     if re.search(r'fork.?join|разветв\w*.*объедин',title) and 'broadcast' not in title:return 'fork_join'

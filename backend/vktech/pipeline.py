@@ -28,7 +28,7 @@ def illustration_prompt(slide):
     text=(slide.title+' '+slide.message).lower()
     suffix='Isometric editorial illustration, VK Education palette with vivid blue, cyan and magenta accents, soft depth, clean pale background, wide 16:9 composition, no words, no letters, no numbers, no logo'
     if 'конкурент' in text and ('абстракт' in text or 'параллел' in text):return 'A tangled cluster of low-level concurrent threads on the left transforms into a clean abstract task graph with parallel branches on the right. '+suffix
-    if 'реализац' in text or 'contention' in text or 'overhead' in text:return 'A shared-memory parallel computer surrounded by data-transfer paths, waiting queues and resource bottlenecks, clear contrast between ideal model and physical system. '+suffix
+    if 'реализац' in text or 'contention' in text or 'overhead' in text:return 'A coherent wide editorial cutaway of one multicore computer: three identical compute tiles, organized cache layers, one shared memory plane and one clearly visible contention bottleneck. Clean structural hierarchy, few purposeful objects, no floating hardware, no loose cables, no server room. '+suffix
     if 'вывод' in text or 'итог' in text:return 'A coherent overview of parallel computing: processors, shared memory, task graph and critical path assembled into one balanced system. '+suffix
     if 'scheduler' in text or 'планиров' in text:return 'Several computing nodes take ready tasks from a shared queue, clear visual flow from queue to processors. '+suffix
     if 'dag' in text or 'граф' in text:return 'A directed acyclic graph made of luminous task nodes and dependency arrows, one critical path is emphasized. '+suffix
@@ -118,7 +118,15 @@ class Pipeline:
                 if not original.generate_images:raise ValueError('Генерация изображений отключена для этой презентации')
                 slide.visual_strategy='generated_image';slide.visual_contract=visual_contract_for(slide)
                 image_candidates[slide.id]=self._generate_image_candidates(slide,content,folder,job.id,visual_update.instruction)
-            plan=enrich_plan(plan,content);write_json(folder/'plan.json',plan.model_dump());scenes=build_scenes(design,content,plan,job.id)
+            plan=enrich_plan(plan,content);write_json(folder/'plan.json',plan.model_dump())
+            rebuilt=build_scenes(design,content,plan,job.id)
+            # A visual edit must not reshuffle every other slide. Preserve the
+            # parent's exact scenes and replace only the edited slide.
+            scenes=[]
+            for candidate in rebuilt:
+                previous=SceneIR.model_validate_json(artifact_path(parentresult['variants'][candidate.variant]['scene']).read_bytes())
+                previous=previous.model_copy(deep=True);previous.id=candidate.id;previous.version+=1
+                previous.slides[index]=candidate.slides[index];scenes.append(previous)
         elif recompose:
             validate_plan(plan,content,original.slide_count)
             plan=assign_visual_strategies(plan,content,original.generate_images)

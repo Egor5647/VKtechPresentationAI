@@ -176,13 +176,13 @@ def test_visual_strategy_uses_native_diagram_for_dependencies(content,plan):
     assert selected.visual_strategy=='diagram' and selected.visual=='hierarchy'
 
 
-def test_visual_strategy_uses_semantic_diagram_for_real_world_model_limit(content,plan):
+def test_visual_strategy_uses_reviewed_image_for_real_world_model_limit(content,plan):
     draft=plan.model_copy(deep=True);target=draft.slides[4]
     target.title='Практическая реализация и ограничения PRAM-модели'
     target.message='Реальная система показывает data movement, contention и инфраструктурные ограничения.'
     target.archetype='explanation'
     selected=assign_visual_strategies(draft,content,True).slides[4]
-    assert selected.visual_strategy=='diagram' and selected.visual=='hierarchy'
+    assert selected.visual_strategy=='generated_image'
     enriched=enrich_plan(PresentationPlan(slides=[selected]),content).slides[0]
     assert enriched.visual_contract.goal
     assert 'Общая память' in enriched.visual_contract.entities

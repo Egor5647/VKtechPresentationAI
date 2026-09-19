@@ -98,7 +98,7 @@ def _diagram(out,node,xywh):
         rx=x+w-half;cache_y=y+round(h*.36);cache_h=round(h*.14)
         for i in range(3):
             px=rx+i*(proc_w+proc_gap)
-            _card(out,node,px,proc_y,proc_w,proc_h,f'Ядро {i+1}',f'{node.id}-core-{i+1}',surface,dark,True)
+            _card(out,node,px,proc_y,proc_w,proc_h,f'P{i+1}',f'{node.id}-core-{i+1}',surface,dark,True)
             _card(out,node,px,cache_y,proc_w,cache_h,'Кэш',f'{node.id}-cache-{i+1}',surface,dark)
             connector(px+proc_w//2,proc_y+proc_h,px+proc_w//2,cache_y,i+10)
         bus_y=y+round(h*.62)
