@@ -51,6 +51,7 @@ def _card(out,node,x,y,w,h,text,name,fill,foreground,bold=False):
     sh=out.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,x,y,w,h)
     sh.name=name;sh.fill.solid();sh.fill.fore_color.rgb=RGBColor.from_string(fill)
     sh.line.color.rgb=RGBColor.from_string(node.data.get('accent','0077FF'));sh.line.width=Pt(1.4)
+    sh.shadow.inherit=False
     tf=sh.text_frame;tf.clear();tf.word_wrap=True;tf.vertical_anchor=MSO_ANCHOR.MIDDLE
     tf.margin_left=tf.margin_right=Pt(9);tf.margin_top=tf.margin_bottom=Pt(6)
     p=tf.paragraphs[0];p.text=text;p.alignment=PP_ALIGN.CENTER
@@ -59,11 +60,20 @@ def _card(out,node,x,y,w,h,text,name,fill,foreground,bold=False):
 
 
 def _arrow(line):
-    """Add a small native PowerPoint arrowhead to a connector."""
+    """Add a restrained native PowerPoint arrowhead to a connector."""
     ln=line._get_or_add_ln()
+    ln.set('cap','rnd')
     for existing in list(ln):
         if existing.tag.endswith('tailEnd'):ln.remove(existing)
-    arrow=OxmlElement('a:tailEnd');arrow.set('type','triangle');arrow.set('w','sm');arrow.set('len','sm');ln.append(arrow)
+    arrow=OxmlElement('a:tailEnd');arrow.set('type','stealth');arrow.set('w','sm');arrow.set('len','med');ln.append(arrow)
+
+
+def _graph_node_bounds(placed,gx,gy,gw,gh):
+    """Project normalized graph geometry while preserving true circles."""
+    nx=gx+round(placed.x*gw);ny=gy+round(placed.y*gh);nw=round(placed.w*gw);nh=round(placed.h*gh)
+    if placed.shape=='circle':
+        diameter=min(nw,nh);nx+=(nw-diameter)//2;ny+=(nh-diameter)//2;nw=nh=diameter
+    return nx,ny,nw,nh
 
 
 def _render_semantic_graph(out,node,xywh,layout_name,items,accent,surface,dark,white):
@@ -77,12 +87,29 @@ def _render_semantic_graph(out,node,xywh,layout_name,items,accent,surface,dark,w
     legend_h=round(h*.20) if layout_name=='work_span' else 0
     gx=x+caption_band;gy=y+legend_h;gw=w-caption_band;gh=h-footer_h-legend_h
     lookup={placed.id:placed for placed in result.nodes}
-    def center(placed):return gx+round((placed.x+placed.w/2)*gw),gy+round((placed.y+placed.h/2)*gh)
+    bounds={}
+    for placed in result.nodes:
+        # A PowerPoint oval becomes distorted when normalized graph coordinates
+        # are projected into a non-square visual region.  Re-center a true
+        # circle in the allocated box and keep rounded semantic states wider.
+        bounds[placed.id]=_graph_node_bounds(placed,gx,gy,gw,gh)
+    def center(placed):
+        nx,ny,nw,nh=bounds[placed.id];return nx+nw/2,ny+nh/2
+    def boundary_point(placed,toward_x,toward_y):
+        nx,ny,nw,nh=bounds[placed.id];cx,cy=nx+nw/2,ny+nh/2
+        dx=toward_x-cx;dy=toward_y-cy
+        if not dx and not dy:return cx,cy
+        scale=1/max(abs(dx)/(nw/2),abs(dy)/(nh/2))
+        return cx+dx*scale,cy+dy*scale
     def endpoint(source,target,start):
         sx,sy=center(source);tx,ty=center(target)
-        if result.direction=='LR':return (sx+round(source.w*gw/2),sy) if start else (tx-round(target.w*gw/2),ty)
-        if result.direction=='BT':return (sx,sy-round(source.h*gh/2)) if start else (tx,ty+round(target.h*gh/2))
-        return (sx,sy+round(source.h*gh/2)) if start else (tx,ty-round(target.h*gh/2))
+        if start:
+            px,py=boundary_point(source,tx,ty);return round(px),round(py)
+        px,py=boundary_point(target,sx,sy)
+        distance=max(1,((tx-sx)**2+(ty-sy)**2)**.5);gap=Pt(.75)
+        # Stop shortly before the outline so the arrowhead does not merge with
+        # the node border.  The marker still clearly points at the target.
+        return round(px-(tx-sx)/distance*gap),round(py-(ty-sy)/distance*gap)
     # Edges are drawn first so nodes remain visually dominant and hide tiny
     # endpoint inaccuracies introduced by PowerPoint's integer coordinates.
     for index,edge in enumerate(result.edges):
@@ -90,15 +117,16 @@ def _render_semantic_graph(out,node,xywh,layout_name,items,accent,surface,dark,w
         x1,y1=endpoint(source,target,True);x2,y2=endpoint(source,target,False)
         shape=out.shapes.add_connector(MSO_CONNECTOR.STRAIGHT,x1,y1,x2,y2)
         shape.name=f'{node.id}-edge-{index+1}';shape.line.color.rgb=RGBColor.from_string(accent if edge.emphasis else dark)
-        shape.line.width=Pt(2.8 if edge.emphasis else 1.35);_arrow(shape.line)
+        shape.line.width=Pt(2.5 if edge.emphasis else 1.25);_arrow(shape.line)
     for index,placed in enumerate(result.nodes):
-        nx=gx+round(placed.x*gw);ny=gy+round(placed.y*gh);nw=round(placed.w*gw);nh=round(placed.h*gh)
+        nx,ny,nw,nh=bounds[placed.id]
         fill=accent if placed.emphasis else surface;foreground=white if placed.emphasis else dark
         if placed.shape=='rounded':
             _card(out,node,nx,ny,nw,nh,placed.label,f'{node.id}-graph-node-{placed.id}',fill,foreground,placed.emphasis)
         else:
             shape=out.shapes.add_shape(MSO_SHAPE.OVAL,nx,ny,nw,nh);shape.name=f'{node.id}-graph-node-{placed.id}'
             shape.fill.solid();shape.fill.fore_color.rgb=RGBColor.from_string(fill);shape.line.color.rgb=RGBColor.from_string(accent);shape.line.width=Pt(1.4)
+            shape.shadow.inherit=False
             if placed.label:
                 tf=shape.text_frame;tf.clear();tf.word_wrap=True;tf.vertical_anchor=MSO_ANCHOR.MIDDLE
                 tf.margin_left=tf.margin_right=Pt(2);tf.margin_top=tf.margin_bottom=Pt(1)
@@ -125,7 +153,7 @@ def _render_semantic_graph(out,node,xywh,layout_name,items,accent,surface,dark,w
             lx=x+index*(legend_w+legend_gap)
             marker=out.shapes.add_shape(MSO_SHAPE.OVAL,lx,y+round(legend_h*.33),round(legend_h*.13),round(legend_h*.13))
             marker.name=f'{node.id}-legend-marker-{index+1}';marker.fill.solid();marker.fill.fore_color.rgb=RGBColor.from_string(accent if index else surface)
-            marker.line.color.rgb=RGBColor.from_string(accent);marker.line.width=Pt(1.2)
+            marker.line.color.rgb=RGBColor.from_string(accent);marker.line.width=Pt(1.2);marker.shadow.inherit=False
             label_x=lx+round(legend_h*.18)
             shape=out.shapes.add_textbox(label_x,y,legend_w-round(legend_h*.18),legend_h);shape.name=f'{node.id}-legend-{index+1}'
             tf=shape.text_frame;tf.clear();tf.word_wrap=True;tf.vertical_anchor=MSO_ANCHOR.MIDDLE;tf.margin_left=tf.margin_right=Pt(2)

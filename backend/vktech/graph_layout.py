@@ -174,9 +174,9 @@ def semantic_graph(layout: str,items: list[str]) -> GraphSpec | None:
         edges=tuple(GraphEdge('fork',f'b{i}') for i in range(1,4))+tuple(GraphEdge(f'b{i}','join') for i in range(1,4))
         return GraphSpec(nodes,edges,GraphRules(node_width=.22,node_height=.14),('Fork','Ветки','Join'),'Готовность после всех предшественников')
     if layout=='reduction_tree':
-        nodes=tuple(GraphNode(f'a{i}',f'A{i}',0) for i in range(1,5))+(GraphNode('p1','+',1),GraphNode('p2','+',1),GraphNode('sum','Σ',2,True))
+        nodes=tuple(GraphNode(f'a{i}',str(i),0) for i in range(1,5))+(GraphNode('p1','+',1),GraphNode('p2','+',1),GraphNode('sum','Σ',2,True))
         edges=(GraphEdge('a1','p1'),GraphEdge('a2','p1'),GraphEdge('a3','p2'),GraphEdge('a4','p2'),GraphEdge('p1','sum'),GraphEdge('p2','sum'))
-        return GraphSpec(nodes,edges,GraphRules(direction='BT',node_width=.14,node_height=.14),('Входы','Пары','Результат'),'Высота дерева — log n')
+        return GraphSpec(nodes,edges,GraphRules(direction='BT',node_width=.14,node_height=.22),('Входы','Пары','Результат'),'Высота дерева — log n')
     if layout=='work_span':
         nodes=(GraphNode('start','',0,True),GraphNode('a','',1,True),GraphNode('b','',1),GraphNode('c','',2),GraphNode('d','',2,True),GraphNode('e','',3,True),GraphNode('f','',3))
         edges=(GraphEdge('start','a',True),GraphEdge('start','b'),GraphEdge('a','c'),GraphEdge('a','d',True),GraphEdge('b','d'),GraphEdge('c','e'),GraphEdge('d','e',True),GraphEdge('d','f'))

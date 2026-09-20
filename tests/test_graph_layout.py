@@ -1,6 +1,7 @@
 import pytest
 
 from vktech.graph_layout import semantic_graph,layout_graph
+from vktech.export import _graph_node_bounds
 
 
 GRAPH_TYPES=('fork_join','reduction_tree','work_span','level_bound','critical_path')
@@ -35,3 +36,10 @@ def test_reduction_tree_centers_parent_layers():
     assert .25<nodes['p1'].center[0]<.5
     assert .5<nodes['p2'].center[0]<.75
     assert nodes['sum'].center[0]==pytest.approx(.5)
+
+
+def test_circle_projection_stays_circular_in_rectangular_region():
+    node=next(node for node in layout_graph(semantic_graph('work_span',[])).nodes if node.shape=='circle')
+    x,y,w,h=_graph_node_bounds(node,100,200,900,360)
+    assert w==h
+    assert x>=100 and y>=200
