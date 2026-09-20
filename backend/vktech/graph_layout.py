@@ -1,14 +1,10 @@
-"""Deterministic semantic graph layout for editable PowerPoint diagrams.
-
-The module deliberately separates meaning (nodes and edges), visual rules and
-geometry.  Exporters consume only the calculated boxes, so the final deck keeps
-native PowerPoint objects instead of embedding a screenshot of Graphviz output.
-"""
+"""Semantic graph validation, metrics and deterministic slide geometry."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
+from .contracts import DiagramSpec
 
 Direction = Literal['TB','BT','LR']
 
@@ -20,6 +16,9 @@ class GraphNode:
     layer: int | None = None
     emphasis: bool = False
     shape: Literal['circle','rounded'] = 'circle'
+    weight: float | None = None
+    role: str = 'task'
+    origin: str = 'source'
 
 
 @dataclass(frozen=True)
@@ -27,6 +26,7 @@ class GraphEdge:
     source: str
     target: str
     emphasis: bool = False
+    label: str = ''
 
 
 @dataclass(frozen=True)
@@ -35,19 +35,22 @@ class GraphRules:
     margin_x: float = .08
     margin_y: float = .08
     node_width: float = .14
-    node_height: float = .14
-    sibling_gap: float = .055
+    node_height: float = .18
     max_crossings: int = 0
-    min_occupancy: float = .48
+    min_occupancy: float = .42
 
 
 @dataclass(frozen=True)
 class GraphSpec:
+    kind: str
     nodes: tuple[GraphNode,...]
     edges: tuple[GraphEdge,...]
     rules: GraphRules
     layer_captions: tuple[str,...] = ()
     footer: str = ''
+    educational_example: bool = False
+    example_label: str = ''
+    metrics: tuple[tuple[str,float],...] = ()
 
 
 @dataclass(frozen=True)
@@ -61,6 +64,9 @@ class PlacedNode:
     emphasis: bool
     shape: str
     layer: int
+    weight: float | None = None
+    role: str = 'task'
+    origin: str = 'source'
 
     @property
     def center(self):return self.x+self.w/2,self.y+self.h/2
@@ -68,11 +74,15 @@ class PlacedNode:
 
 @dataclass(frozen=True)
 class GraphLayout:
+    kind: str
     nodes: tuple[PlacedNode,...]
     edges: tuple[GraphEdge,...]
     direction: Direction
     layer_captions: tuple[str,...]
     footer: str
+    educational_example: bool
+    example_label: str
+    metrics: tuple[tuple[str,float],...]
     crossings: int
     occupancy: float
 
@@ -82,11 +92,10 @@ def _layers(spec: GraphSpec) -> dict[str,int]:
     if len(explicit)==len(spec.nodes):return {key:int(value) for key,value in explicit.items()}
     incoming={node.id:[] for node in spec.nodes}
     for edge in spec.edges:incoming[edge.target].append(edge.source)
-    result={}
-    pending={node.id for node in spec.nodes}
+    result={};pending={node.id for node in spec.nodes}
     while pending:
         progressed=False
-        for node_id in list(pending):
+        for node_id in sorted(pending):
             parents=incoming[node_id]
             if all(parent in result for parent in parents):
                 result[node_id]=max((result[parent]+1 for parent in parents),default=0)
@@ -95,15 +104,30 @@ def _layers(spec: GraphSpec) -> dict[str,int]:
     return result
 
 
+def _validate(spec: GraphSpec):
+    ids=[node.id for node in spec.nodes]
+    if len(ids)!=len(set(ids)):raise ValueError('Graph node IDs must be unique')
+    known=set(ids)
+    if any(edge.source not in known or edge.target not in known for edge in spec.edges):raise ValueError('Graph edge references an unknown node')
+    indegree={node_id:0 for node_id in ids};outgoing={node_id:[] for node_id in ids}
+    for edge in spec.edges:indegree[edge.target]+=1;outgoing[edge.source].append(edge.target)
+    queue=[node_id for node_id,value in indegree.items() if value==0];visited=0
+    while queue:
+        node_id=queue.pop(0);visited+=1
+        for target in outgoing[node_id]:
+            indegree[target]-=1
+            if indegree[target]==0:queue.append(target)
+    if visited!=len(ids):raise ValueError('Graph must be acyclic')
+    _layers(spec)
+
+
 def _ordered_layers(spec: GraphSpec,layers: dict[str,int]) -> list[list[str]]:
     count=max(layers.values(),default=0)+1
     result=[[node.id for node in spec.nodes if layers[node.id]==layer] for layer in range(count)]
     incoming={node.id:[] for node in spec.nodes};outgoing={node.id:[] for node in spec.nodes}
     for edge in spec.edges:
         incoming[edge.target].append(edge.source);outgoing[edge.source].append(edge.target)
-    # Alternating barycentric sweeps reduce crossings without introducing a
-    # runtime dependency or non-determinism.
-    for _ in range(4):
+    for _ in range(6):
         positions={node_id:index for layer in result for index,node_id in enumerate(layer)}
         for layer in range(1,count):
             result[layer].sort(key=lambda node_id:(sum(positions[parent] for parent in incoming[node_id])/max(1,len(incoming[node_id])),positions[node_id],node_id))
@@ -131,22 +155,60 @@ def _segments_cross(a,b,c,d):
     return side(a,b,c)*side(a,b,d)<0 and side(c,d,a)*side(c,d,b)<0
 
 
+def _critical_path(nodes: tuple[GraphNode,...],edges: tuple[GraphEdge,...]):
+    """Return Work, Span and every node/edge belonging to a longest path."""
+    incoming={node.id:[] for node in nodes};outgoing={node.id:[] for node in nodes};indegree={node.id:0 for node in nodes}
+    for edge in edges:
+        incoming[edge.target].append(edge.source);outgoing[edge.source].append(edge.target);indegree[edge.target]+=1
+    queue=sorted(node_id for node_id,value in indegree.items() if value==0);order=[]
+    while queue:
+        node_id=queue.pop(0);order.append(node_id)
+        for target in outgoing[node_id]:
+            indegree[target]-=1
+            if indegree[target]==0:queue.append(target);queue.sort()
+    if len(order)!=len(nodes):raise ValueError('Graph must be acyclic')
+    weights={node.id:float(node.weight if node.weight is not None else 1) for node in nodes}
+    distance={};best_parents={}
+    for node_id in order:
+        parents=incoming[node_id];best=max((distance[parent] for parent in parents),default=0)
+        distance[node_id]=best+weights[node_id]
+        best_parents[node_id]={parent for parent in parents if abs(distance[parent]-best)<1e-9}
+    span=max(distance.values(),default=0);frontier=[node_id for node_id,value in distance.items() if abs(value-span)<1e-9]
+    critical_nodes=set(frontier);critical_edges=set()
+    while frontier:
+        target=frontier.pop()
+        for source in best_parents[target]:
+            critical_edges.add((source,target))
+            if source not in critical_nodes:critical_nodes.add(source);frontier.append(source)
+    return sum(weights.values()),span,critical_nodes,critical_edges
+
+
+def _emphasize_critical(spec: GraphSpec) -> GraphSpec:
+    work,span,nodes,edges=_critical_path(spec.nodes,spec.edges)
+    updated_nodes=tuple(GraphNode(n.id,n.label,n.layer,n.id in nodes,n.shape,n.weight,n.role,n.origin) for n in spec.nodes)
+    updated_edges=tuple(GraphEdge(e.source,e.target,(e.source,e.target) in edges,e.label) for e in spec.edges)
+    footer=spec.footer or (f'Span S = {span:g}' if spec.kind=='critical_path' else '')
+    metrics=(('work',work),('span',span))
+    return GraphSpec(spec.kind,updated_nodes,updated_edges,spec.rules,spec.layer_captions,footer,spec.educational_example,spec.example_label,metrics)
+
+
 def layout_graph(spec: GraphSpec) -> GraphLayout:
-    node_by_id={node.id:node for node in spec.nodes}
-    if len(node_by_id)!=len(spec.nodes):raise ValueError('Graph node IDs must be unique')
-    if any(edge.source not in node_by_id or edge.target not in node_by_id for edge in spec.edges):raise ValueError('Graph edge references an unknown node')
+    _validate(spec);node_by_id={node.id:node for node in spec.nodes}
     layers=_layers(spec);ordered=_ordered_layers(spec,layers);rules=spec.rules
-    layer_count=len(ordered);placed=[]
+    layer_count=len(ordered);placed=[];centers_by_id={}
     if rules.direction in {'TB','BT'}:
         usable_start=rules.margin_x+rules.node_width/2;usable_end=1-rules.margin_x-rules.node_width/2
         vertical=_spread(layer_count,rules.margin_y+rules.node_height/2,1-rules.margin_y-rules.node_height/2)
         if rules.direction=='BT':vertical=list(reversed(vertical))
-        widest=max(map(len,ordered),default=1)
+        widest=max(map(len,ordered),default=1);incoming={node.id:[] for node in spec.nodes}
+        for edge in spec.edges:incoming[edge.target].append(edge.source)
         for layer,node_ids in enumerate(ordered):
-            horizontal=_aligned_spread(len(node_ids),widest,usable_start,usable_end)
+            if spec.kind=='reduction_tree' and layer>0:
+                horizontal=[sum(centers_by_id[parent] for parent in incoming[node_id])/len(incoming[node_id]) for node_id in node_ids]
+            else:horizontal=_aligned_spread(len(node_ids),widest,usable_start,usable_end)
             for center_x,node_id in zip(horizontal,node_ids):
-                source=node_by_id[node_id];center_y=vertical[layer]
-                placed.append(PlacedNode(node_id,source.label,center_x-rules.node_width/2,center_y-rules.node_height/2,rules.node_width,rules.node_height,source.emphasis,source.shape,layer))
+                source=node_by_id[node_id];center_y=vertical[layer];centers_by_id[node_id]=center_x
+                placed.append(PlacedNode(node_id,source.label,center_x-rules.node_width/2,center_y-rules.node_height/2,rules.node_width,rules.node_height,source.emphasis,source.shape,layer,source.weight,source.role,source.origin))
     else:
         horizontal=_spread(layer_count,rules.margin_x+rules.node_width/2,1-rules.margin_x-rules.node_width/2)
         usable_start=rules.margin_y+rules.node_height/2;usable_end=1-rules.margin_y-rules.node_height/2
@@ -155,7 +217,7 @@ def layout_graph(spec: GraphSpec) -> GraphLayout:
             vertical=_aligned_spread(len(node_ids),widest,usable_start,usable_end)
             for center_y,node_id in zip(vertical,node_ids):
                 source=node_by_id[node_id];center_x=horizontal[layer]
-                placed.append(PlacedNode(node_id,source.label,center_x-rules.node_width/2,center_y-rules.node_height/2,rules.node_width,rules.node_height,source.emphasis,source.shape,layer))
+                placed.append(PlacedNode(node_id,source.label,center_x-rules.node_width/2,center_y-rules.node_height/2,rules.node_width,rules.node_height,source.emphasis,source.shape,layer,source.weight,source.role,source.origin))
     lookup={node.id:node for node in placed};crossings=0
     for index,left in enumerate(spec.edges):
         for right in spec.edges[index+1:]:
@@ -164,31 +226,85 @@ def layout_graph(spec: GraphSpec) -> GraphLayout:
     min_x=min(node.x for node in placed);max_x=max(node.x+node.w for node in placed)
     min_y=min(node.y for node in placed);max_y=max(node.y+node.h for node in placed)
     occupancy=(max_x-min_x)*(max_y-min_y)
-    return GraphLayout(tuple(placed),spec.edges,rules.direction,spec.layer_captions,spec.footer,crossings,occupancy)
+    return GraphLayout(spec.kind,tuple(placed),spec.edges,rules.direction,spec.layer_captions,spec.footer,spec.educational_example,spec.example_label,spec.metrics,crossings,occupancy)
 
 
-def semantic_graph(layout: str,items: list[str]) -> GraphSpec | None:
-    """Return the semantic graph and its visual contract for a known grammar."""
+def _rules(kind: str):
+    return {
+        'fork_join':GraphRules(node_width=.22,node_height=.18),
+        'reduction_tree':GraphRules(direction='BT',node_width=.14,node_height=.20),
+        'work_span':GraphRules(direction='LR',node_width=.17,node_height=.18),
+        'critical_path':GraphRules(direction='LR',node_width=.18,node_height=.18),
+        'level_schedule':GraphRules(node_width=.12,node_height=.16),
+        'level_bound_proof':GraphRules(direction='LR',node_width=.27,node_height=.20,margin_x=.04,min_occupancy=.15),
+    }[kind]
+
+
+def _from_description(description: DiagramSpec) -> GraphSpec:
+    kind=description.kind;nodes=[]
+    for item in description.nodes:
+        shape='rounded' if item.role in {'state','bound'} or (kind in {'work_span','critical_path'} and item.weight is not None) else 'circle'
+        nodes.append(GraphNode(item.id,item.label,item.layer,False,shape,item.weight,item.role,item.origin))
+    edges=tuple(GraphEdge(edge.source,edge.target,False,edge.label) for edge in description.edges);captions=()
+    if kind=='level_schedule':
+        count=max((node.layer or 0 for node in description.nodes),default=0)+1;captions=tuple(f'Уровень {index+1}' for index in range(count))
+    path_edges=set(zip(description.highlighted_path,description.highlighted_path[1:]));path_nodes=set(description.highlighted_path)
+    if path_nodes:
+        nodes=[GraphNode(n.id,n.label,n.layer,n.id in path_nodes,n.shape,n.weight,n.role,n.origin) for n in nodes]
+        edges=tuple(GraphEdge(edge.source,edge.target,(edge.source,edge.target) in path_edges,edge.label) for edge in edges)
+    spec=GraphSpec(kind,tuple(nodes),edges,_rules(kind),captions,description.footer,description.educational_example,description.example_label)
+    if kind in {'work_span','critical_path'}:
+        computed=_emphasize_critical(spec)
+        critical_edges={(edge.source,edge.target) for edge in computed.edges if edge.emphasis}
+        if path_edges and not path_edges<=critical_edges:raise ValueError('Highlighted path is not a critical path')
+        return computed
+    return spec
+
+
+def default_diagram(layout: str,items: list[str]) -> DiagramSpec | None:
+    if layout=='level_bound':layout='level_schedule'
     if layout=='fork_join':
-        nodes=(GraphNode('fork','Fork',0,True,'rounded'),*(GraphNode(f'b{i}',str(i),1) for i in range(1,4)),GraphNode('join','Join',2,True,'rounded'))
-        edges=tuple(GraphEdge('fork',f'b{i}') for i in range(1,4))+tuple(GraphEdge(f'b{i}','join') for i in range(1,4))
-        return GraphSpec(nodes,edges,GraphRules(node_width=.22,node_height=.14),('Fork','Ветки','Join'),'Готовность после всех предшественников')
+        return DiagramSpec(kind=layout,nodes=[{'id':'fork','label':'Fork','layer':0,'role':'state'},*({'id':f'b{i}','label':str(i),'layer':1} for i in range(1,4)),{'id':'join','label':'Join','layer':2,'role':'state'}],edges=[*({'source':'fork','target':f'b{i}'} for i in range(1,4)),*({'source':f'b{i}','target':'join'} for i in range(1,4))],footer='Готовность после завершения всех ветвей')
     if layout=='reduction_tree':
-        nodes=tuple(GraphNode(f'a{i}',str(i),0) for i in range(1,5))+(GraphNode('p1','+',1),GraphNode('p2','+',1),GraphNode('sum','Σ',2,True))
-        edges=(GraphEdge('a1','p1'),GraphEdge('a2','p1'),GraphEdge('a3','p2'),GraphEdge('a4','p2'),GraphEdge('p1','sum'),GraphEdge('p2','sum'))
-        return GraphSpec(nodes,edges,GraphRules(direction='BT',node_width=.14,node_height=.22),('Входы','Пары','Результат'),'Высота дерева — log n')
-    if layout=='work_span':
-        nodes=(GraphNode('start','',0,True),GraphNode('a','',1,True),GraphNode('b','',1),GraphNode('c','',2),GraphNode('d','',2,True),GraphNode('e','',3,True),GraphNode('f','',3))
-        edges=(GraphEdge('start','a',True),GraphEdge('start','b'),GraphEdge('a','c'),GraphEdge('a','d',True),GraphEdge('b','d'),GraphEdge('c','e'),GraphEdge('d','e',True),GraphEdge('d','f'))
-        footer=items[2] if len(items)>2 else 'T_P ≥ max(W/P, S)'
-        return GraphSpec(nodes,edges,GraphRules(direction='LR',node_width=.11,node_height=.13),(),footer)
-    if layout=='level_bound':
-        nodes=(GraphNode('a','',0,True),GraphNode('b','',0,True),GraphNode('c','',1),GraphNode('d','',1),GraphNode('e','',1),GraphNode('f','',2),GraphNode('g','',2))
-        edges=(GraphEdge('a','c',True),GraphEdge('a','d'),GraphEdge('b','d',True),GraphEdge('b','e'),GraphEdge('c','f',True),GraphEdge('d','f'),GraphEdge('d','g',True),GraphEdge('e','g'))
-        footer=items[2] if len(items)>2 else 'T_level ≤ 2T*'
-        return GraphSpec(nodes,edges,GraphRules(node_width=.11,node_height=.12),('Уровень 1','Уровень 2','Уровень 3'),footer)
-    if layout=='critical_path':
-        nodes=(GraphNode('s','',0,True),GraphNode('a','',1,True),GraphNode('b','',1),GraphNode('c','',2),GraphNode('d','',2,True),GraphNode('e','',3,True))
-        edges=(GraphEdge('s','a',True),GraphEdge('s','b'),GraphEdge('a','d',True),GraphEdge('b','c'),GraphEdge('c','e'),GraphEdge('d','e',True))
-        return GraphSpec(nodes,edges,GraphRules(direction='LR',node_width=.12,node_height=.14),(),'Выделен критический путь')
+        return DiagramSpec(kind=layout,nodes=[*({'id':f'a{i}','label':f'A{i}','layer':0,'role':'input'} for i in range(1,5)),{'id':'p1','label':'+','layer':1,'role':'operation'},{'id':'p2','label':'+','layer':1,'role':'operation'},{'id':'sum','label':'Σ','layer':2,'role':'result'}],edges=[{'source':'a1','target':'p1'},{'source':'a2','target':'p1'},{'source':'a3','target':'p2'},{'source':'a4','target':'p2'},{'source':'p1','target':'sum'},{'source':'p2','target':'sum'}],footer='Высота дерева равна log n')
+    if layout in {'work_span','critical_path'}:
+        weights=(2,3,2,2,4,1,2);ids=('a','b','c','d','e','f','g');edges=(('a','b'),('a','c'),('b','d'),('b','e'),('c','e'),('d','f'),('e','f'),('e','g'))
+        return DiagramSpec(kind=layout,nodes=[{'id':node_id,'label':node_id.upper(),'weight':weight,'origin':'example'} for node_id,weight in zip(ids,weights)],edges=[{'source':a,'target':b} for a,b in edges],educational_example=True,example_label='Учебный пример',footer='T_P ≥ max(W/P, S)' if layout=='work_span' else '',highlighted_path=['a','b','e','g'])
+    if layout=='level_schedule':
+        return DiagramSpec(kind=layout,nodes=[{'id':'a','label':'A','layer':0},{'id':'b','label':'B','layer':0},{'id':'c','label':'C','layer':1},{'id':'d','label':'D','layer':1},{'id':'e','label':'E','layer':1},{'id':'f','label':'F','layer':2},{'id':'g','label':'G','layer':2}],edges=[{'source':'a','target':'c'},{'source':'a','target':'d'},{'source':'b','target':'d'},{'source':'b','target':'e'},{'source':'c','target':'f'},{'source':'d','target':'f'},{'source':'d','target':'g'},{'source':'e','target':'g'}],footer=items[0] if items else 'Выполнение завершается по уровням')
+    if layout=='level_bound_proof':
+        return DiagramSpec(kind=layout,nodes=[{'id':'actual','label':'T_level','layer':0,'role':'bound'},{'id':'decomposition','label':'W/P + S','layer':1,'role':'bound'},{'id':'optimum','label':'2T*','layer':2,'role':'bound'}],edges=[{'source':'actual','target':'decomposition','label':'≤'},{'source':'decomposition','target':'optimum','label':'≤'}],footer='Количество уровней не превышает длину критического пути')
     return None
+
+
+def semantic_graph(layout: str,items: list[str],description: DiagramSpec | dict | None=None) -> GraphSpec | None:
+    """Build a validated semantic graph, using legacy profiles as fallback."""
+    if description is not None:
+        if not isinstance(description,DiagramSpec):description=DiagramSpec.model_validate(description)
+        return _from_description(description)
+    fallback=default_diagram(layout,items)
+    return _from_description(fallback) if fallback else None
+
+
+def graph_quality(layout: str,items: list[str],description: DiagramSpec | dict | None=None) -> tuple[GraphLayout|None,list[str]]:
+    """Return deterministic semantic and geometry failures for selection/audit."""
+    try:spec=semantic_graph(layout,items,description)
+    except (TypeError,ValueError) as error:return None,[str(error)]
+    if spec is None:return None,[]
+    result=layout_graph(spec);failures=[]
+    if result.crossings>spec.rules.max_crossings:failures.append('edge_crossings')
+    if result.occupancy<spec.rules.min_occupancy:failures.append('low_occupancy')
+    if any(not node.label.strip() or len(node.label)>({'circle':8,'rounded':24}[node.shape]) for node in result.nodes):
+        failures.append('unreadable_labels')
+    if result.kind in {'work_span','critical_path'}:
+        if any(node.weight is None for node in result.nodes):failures.append('missing_weights')
+        if not result.metrics:failures.append('missing_metrics')
+    if result.educational_example and not result.example_label.strip():failures.append('unlabeled_example')
+    if result.kind=='reduction_tree':
+        lookup={node.id:node for node in result.nodes};incoming={node.id:[] for node in result.nodes}
+        for edge in result.edges:incoming[edge.target].append(edge.source)
+        for node_id,parents in incoming.items():
+            if len(parents)>1:
+                expected=sum(lookup[parent].center[0] for parent in parents)/len(parents)
+                if abs(lookup[node_id].center[0]-expected)>.001:failures.append('uncentered_parent');break
+    return result,failures

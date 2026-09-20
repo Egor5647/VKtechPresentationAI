@@ -4,6 +4,7 @@ from pathlib import Path
 from PIL import Image,ImageFilter,ImageStat
 from .contracts import SceneIR
 from .audit import union_area
+from .graph_layout import graph_quality
 
 
 def _pixels(image):
@@ -36,6 +37,15 @@ def score_candidate(scene,slide,preview:Path|None=None):
     if visuals:
         area=sum(n.box.w*n.box.h for n in visuals);score+=8 if .18<=area<=.42 else -8
         reasons['visual_area']=round(area,3)
+    graph_failures=[]
+    for diagram in (node for node in slide.nodes if node.kind=='diagram'):
+        _,failures=graph_quality(diagram.data.get('layout','list'),diagram.data.get('items',[]),diagram.data.get('graph'))
+        graph_failures.extend(failures)
+    if graph_failures:
+        fatal={'edge_crossings','unreadable_labels','missing_weights','missing_metrics','unlabeled_example','uncentered_parent'}
+        score-=100 if fatal.intersection(graph_failures) else 25
+        reasons['graph_failures']=sorted(set(graph_failures))
+        reasons['disqualified']=bool(fatal.intersection(graph_failures))
     if slide.background.upper() not in {'FFFFFF','FEFEFE'}:score+=4;reasons['branded_background']=True
     image=next((n for n in slide.nodes if n.kind=='image'),None)
     if image:
@@ -59,7 +69,8 @@ def layout_signature(slide):
     for node in slide.nodes:
         if node.role=='accent':continue
         box=tuple(round(value*12) for value in (node.box.x,node.box.y,node.box.w,node.box.h))
-        nodes.append((node.kind,node.role,box))
+        semantic=node.data.get('layout') if node.kind=='diagram' else None
+        nodes.append((node.kind,node.role,semantic,box))
     background='dark' if slide.background.upper() not in {'FFFFFF','FEFEFE','F4F7F4','F7F9FB'} else 'light'
     return slide.role,background,tuple(nodes)
 

@@ -89,11 +89,64 @@ class Asset(Contract):
     purpose: Literal["output", "reference"] = "output"
 
 
+class DiagramNodeSpec(Contract):
+    id: str = Field(min_length=1, max_length=40, pattern=r"^[A-Za-z0-9_-]+$")
+    label: str = Field(default="", max_length=40)
+    layer: int | None = Field(default=None, ge=0, le=12)
+    weight: float | None = Field(default=None, ge=0)
+    role: Literal["task", "input", "operation", "result", "state", "bound"] = "task"
+    origin: Literal["source", "derived", "example"] = "source"
+    claim_ids: list[str] = Field(default_factory=list, max_length=6)
+
+
+class DiagramEdgeSpec(Contract):
+    source: str = Field(min_length=1, max_length=40)
+    target: str = Field(min_length=1, max_length=40)
+    label: str = Field(default="", max_length=32)
+
+
+class DiagramSpec(Contract):
+    kind: Literal["fork_join", "reduction_tree", "work_span", "level_schedule", "level_bound_proof", "critical_path"]
+    nodes: list[DiagramNodeSpec] = Field(min_length=2, max_length=16)
+    edges: list[DiagramEdgeSpec] = Field(default_factory=list, max_length=32)
+    educational_example: bool = False
+    example_label: str = Field(default="", max_length=60)
+    footer: str = Field(default="", max_length=120)
+    highlighted_path: list[str] = Field(default_factory=list, max_length=16)
+
+    @model_validator(mode="after")
+    def valid_graph(self):
+        ids=[node.id for node in self.nodes]
+        if len(ids)!=len(set(ids)):raise ValueError("Diagram node IDs must be unique")
+        known=set(ids)
+        if any(edge.source not in known or edge.target not in known for edge in self.edges):
+            raise ValueError("Diagram edge references an unknown node")
+        if any(node.origin=="example" for node in self.nodes) and not self.educational_example:
+            raise ValueError("Example values require educational_example=true")
+        if any(node_id not in known for node_id in self.highlighted_path):
+            raise ValueError("Highlighted path references an unknown node")
+        edge_pairs={(edge.source,edge.target) for edge in self.edges}
+        if any(pair not in edge_pairs for pair in zip(self.highlighted_path,self.highlighted_path[1:])):
+            raise ValueError("Highlighted path must follow graph edges")
+        incoming={node_id:0 for node_id in ids};outgoing={node_id:[] for node_id in ids}
+        for edge in self.edges:
+            incoming[edge.target]+=1;outgoing[edge.source].append(edge.target)
+        queue=[node_id for node_id,value in incoming.items() if value==0];visited=0
+        while queue:
+            node_id=queue.pop(0);visited+=1
+            for target in outgoing[node_id]:
+                incoming[target]-=1
+                if incoming[target]==0:queue.append(target)
+        if visited!=len(ids):raise ValueError("Diagram graph must be acyclic")
+        return self
+
+
 class VisualContract(Contract):
     goal: str = Field(default="", max_length=300)
     entities: list[str] = Field(default_factory=list, max_length=6)
     relations: list[str] = Field(default_factory=list, max_length=6)
     forbidden: list[str] = Field(default_factory=list, max_length=6)
+    diagram: DiagramSpec | None = None
 
 
 class ContentIR(Contract):

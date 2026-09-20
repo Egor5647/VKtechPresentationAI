@@ -8,7 +8,7 @@ from vktech.planning import NeedsInput,build_scenes,validate_plan,plan_with_mode
 from vktech.export import export_pptx,export_html,_card_font_size
 from vktech.opc import Package
 from vktech.audit import audit_scene,audit_rendered_deck,repair_scene,contrast
-from vktech.contracts import Box,Node,PaletteSpec,RepairRequest,GenerateRequest,PresentationPlan,SceneIR,Slot,Style,ImageSelection,ImageCandidateScore
+from vktech.contracts import Box,DiagramSpec,Node,PaletteSpec,RepairRequest,GenerateRequest,PresentationPlan,SceneIR,Slot,Style,ImageSelection,ImageCandidateScore
 from vktech.palette import palette_from_design,recolor_design,recolor_scene,recolor_template
 from vktech.store import Store,Job
 from vktech.worker import execute
@@ -221,9 +221,10 @@ def test_visual_strategy_uses_image_for_conceptual_transition(content,plan):
     ('Fork-Join и DAG вычислений','fork_join'),
     ('От конкурентного кода к абстрактной модели','abstraction'),
     ('Work и Span: критический путь','work_span'),
-    ('Level-by-level scheduler: доказательство 2-аппроксимации','level_bound'),
+    ('Level-by-level scheduler: доказательство 2-аппроксимации','level_bound_proof'),
+    ('Level-by-level scheduler: выполнение по уровням','level_schedule'),
     ('Greedy scheduler: формула верхней границы','formula_focus'),
-    ('Level-by-level scheduler','scheduler'),
+    ('Level-by-level scheduler','level_schedule'),
     ('Broadcast, reduction и планировщики','comparison'),
     ('Практическая реализация и ограничения PRAM-модели','pram_reality'),
 ])
@@ -330,6 +331,44 @@ def test_diagram_uses_short_model_labels_and_readable_type(template_bytes,conten
         limit=2 if scene.variant=='A' else 3
         assert node.data['items']==target.visual_items[:limit]
         assert node.style.size>=20
+
+
+def test_graph_semantics_are_identical_across_density_variants(template_bytes,content,plan):
+    draft=plan.model_copy(deep=True);target=draft.slides[3]
+    target.title='Work и Span: критический путь';target.visual='hierarchy'
+    structured=enrich_plan(draft,content);scenes=build_scenes(import_template(template_bytes),content,structured,'shared-graph')
+    graphs=[]
+    for scene in scenes:
+        node=next(node for node in scene.slides[3].nodes if node.kind=='diagram')
+        graphs.append(node.data['graph'])
+    assert graphs[0]==graphs[1]==graphs[2]
+    assert graphs[0]['educational_example'] is True
+    assert graphs[0]['example_label']=='Учебный пример'
+
+
+def test_weighted_source_graph_requires_claim_provenance(content,plan):
+    broken=plan.model_copy(deep=True);slide=broken.slides[3]
+    slide.visual_contract.diagram=DiagramSpec.model_validate({
+        'kind':'work_span',
+        'nodes':[{'id':'a','label':'A','weight':2,'origin':'source'},{'id':'b','label':'B','weight':1,'origin':'source'}],
+        'edges':[{'source':'a','target':'b'}],
+    })
+    with pytest.raises(ValueError,match='require claim_ids'):validate_plan(broken,content,12)
+
+
+def test_semantic_graph_exports_as_editable_shapes_and_html_svg(template_bytes,content,plan,tmp_path):
+    draft=plan.model_copy(deep=True);target=draft.slides[3]
+    target.title='Критический путь';target.visual='hierarchy'
+    structured=enrich_plan(draft,content);design=import_template(template_bytes)
+    scene=build_scenes(design,content,structured,'graph-exports')[1]
+    pptx=tmp_path/'graph.pptx';html=tmp_path/'graph.html'
+    export_pptx(template_bytes,design,scene,pptx);export_html(scene,html)
+    slide=Presentation(pptx).slides[3];names=[shape.name for shape in slide.shapes]
+    assert sum('-graph-node-' in name for name in names)>=3
+    assert sum('-edge-' in name for name in names)>=2
+    assert any(name.endswith('-example-label') for name in names)
+    markup=html.read_text(encoding='utf-8')
+    assert '<svg' in markup and '<line ' in markup and 'Учебный пример' in markup and 'Span S = 11' in markup
 
 
 def test_narrow_sequence_uses_vertical_cards_and_shortens_long_labels(template_bytes,content,plan,tmp_path):

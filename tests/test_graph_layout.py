@@ -1,18 +1,24 @@
+import math
+
 import pytest
+from pydantic import ValidationError
 
-from vktech.graph_layout import semantic_graph,layout_graph
-from vktech.export import _graph_node_bounds
+from vktech.contracts import DiagramSpec
+from vktech.export import _graph_boundary_point, _graph_node_bounds
+from vktech.graph_layout import graph_quality, layout_graph, semantic_graph
 
 
-GRAPH_TYPES=('fork_join','reduction_tree','work_span','level_bound','critical_path')
+GRAPH_TYPES=(
+    'fork_join','reduction_tree','work_span','level_schedule',
+    'level_bound_proof','critical_path',
+)
 
 
 @pytest.mark.parametrize('name',GRAPH_TYPES)
 def test_semantic_graph_rules_produce_clean_layout(name):
-    spec=semantic_graph(name,['Work','Span','T ≤ 2T*'])
-    result=layout_graph(spec)
-    assert result.crossings<=spec.rules.max_crossings
-    assert result.occupancy>=spec.rules.min_occupancy
+    result,failures=graph_quality(name,['Work','Span','T ≤ 2T*'])
+    assert not failures
+    assert result.crossings==0
     for node in result.nodes:
         assert 0<=node.x<node.x+node.w<=1
         assert 0<=node.y<node.y+node.h<=1
@@ -21,25 +27,70 @@ def test_semantic_graph_rules_produce_clean_layout(name):
             assert left.x+left.w<=right.x or right.x+right.w<=left.x or left.y+left.h<=right.y or right.y+right.h<=left.y
 
 
-def test_graph_layout_is_deterministic_and_preserves_critical_path():
+def test_graph_layout_is_deterministic_and_computes_work_span():
     spec=semantic_graph('work_span',['Work','Span','T_P ≥ max(W/P, S)'])
     first=layout_graph(spec);second=layout_graph(spec)
     assert first==second
-    emphasized={node.id for node in first.nodes if node.emphasis}
-    assert emphasized=={'start','a','d','e'}
-    assert sum(edge.emphasis for edge in first.edges)==3
+    assert dict(first.metrics)=={'work':16.0,'span':11.0}
+    assert {node.id for node in first.nodes if node.emphasis}=={'a','b','e','g'}
+    assert {(edge.source,edge.target) for edge in first.edges if edge.emphasis}=={('a','b'),('b','e'),('e','g')}
+    assert first.educational_example and first.example_label=='Учебный пример'
 
 
-def test_reduction_tree_centers_parent_layers():
-    result=layout_graph(semantic_graph('reduction_tree',[]))
-    nodes={node.id:node for node in result.nodes}
-    assert .25<nodes['p1'].center[0]<.5
-    assert .5<nodes['p2'].center[0]<.75
-    assert nodes['sum'].center[0]==pytest.approx(.5)
+def test_equal_critical_paths_are_all_highlighted():
+    diagram=DiagramSpec(
+        kind='critical_path',
+        nodes=[
+            {'id':'a','label':'A','weight':2,'origin':'example'},
+            {'id':'b','label':'B','weight':2,'origin':'example'},
+            {'id':'end','label':'Итог','weight':1,'origin':'example'},
+        ],
+        edges=[{'source':'a','target':'end'},{'source':'b','target':'end'}],
+        educational_example=True,example_label='Учебный пример',
+    )
+    result=layout_graph(semantic_graph('critical_path',[],diagram))
+    assert dict(result.metrics)=={'work':5.0,'span':3.0}
+    assert {node.id for node in result.nodes if node.emphasis}=={'a','b','end'}
+    assert sum(edge.emphasis for edge in result.edges)==2
 
 
-def test_circle_projection_stays_circular_in_rectangular_region():
-    node=next(node for node in layout_graph(semantic_graph('work_span',[])).nodes if node.shape=='circle')
-    x,y,w,h=_graph_node_bounds(node,100,200,900,360)
-    assert w==h
-    assert x>=100 and y>=200
+@pytest.mark.parametrize('payload,message',[
+    ({'kind':'fork_join','nodes':[{'id':'a'},{'id':'a'}]},'unique'),
+    ({'kind':'fork_join','nodes':[{'id':'a'},{'id':'b'}],'edges':[{'source':'a','target':'missing'}]},'unknown'),
+    ({'kind':'fork_join','nodes':[{'id':'a'},{'id':'b'}],'edges':[{'source':'a','target':'b'},{'source':'b','target':'a'}]},'acyclic'),
+    ({'kind':'work_span','nodes':[{'id':'a','weight':2,'origin':'example'},{'id':'b'}]},'educational_example'),
+])
+def test_invalid_semantic_graphs_are_rejected(payload,message):
+    with pytest.raises(ValidationError,match=message):DiagramSpec.model_validate(payload)
+
+
+def test_reduction_tree_centers_each_parent_between_children():
+    result=layout_graph(semantic_graph('reduction_tree',[]));nodes={node.id:node for node in result.nodes}
+    assert nodes['p1'].center[0]==pytest.approx((nodes['a1'].center[0]+nodes['a2'].center[0])/2)
+    assert nodes['p2'].center[0]==pytest.approx((nodes['a3'].center[0]+nodes['a4'].center[0])/2)
+    assert nodes['sum'].center[0]==pytest.approx((nodes['p1'].center[0]+nodes['p2'].center[0])/2)
+
+
+def test_circle_projection_and_diagonal_boundary_are_exact():
+    node=next(node for node in layout_graph(semantic_graph('fork_join',[])).nodes if node.shape=='circle')
+    x,y,w,h=_graph_node_bounds(node,100,200,900,360);bounds={node.id:(x,y,w,h)}
+    assert w==h and x>=100 and y>=200
+    px,py=_graph_boundary_point(bounds,node,x+w*2,y+h*2)
+    assert math.hypot(px-(x+w/2),py-(y+h/2))==pytest.approx(w/2)
+
+
+def test_rectangle_diagonal_boundary_hits_real_box_edge():
+    node=next(node for node in layout_graph(semantic_graph('critical_path',[])).nodes if node.shape=='rounded')
+    bounds={node.id:(100,200,160,80)}
+    px,py=_graph_boundary_point(bounds,node,400,400)
+    assert px==pytest.approx(260) or py==pytest.approx(280)
+    assert 100<=px<=260 and 200<=py<=280
+
+
+def test_unreadable_graph_labels_disqualify_candidate():
+    diagram=DiagramSpec(kind='fork_join',nodes=[
+        {'id':'a','label':'Слишком длинная подпись для круга'},
+        {'id':'b','label':'B'},
+    ],edges=[{'source':'a','target':'b'}])
+    _,failures=graph_quality('fork_join',[],diagram)
+    assert 'unreadable_labels' in failures

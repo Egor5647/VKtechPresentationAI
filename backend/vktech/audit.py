@@ -6,9 +6,10 @@ from functools import lru_cache
 from pathlib import Path
 from PIL import Image,ImageFilter,ImageFont
 from .contracts import AuditReport, Issue, ContextualReport, ContextualFailureReport
+from .graph_layout import graph_quality
 
 RULES={
- 'D01':'Элемент вне слайда','D02':'Наложение блоков','D03':'Переполнение текста','D04':'Текст обрезан краем','D05':'Выравнивание по шаблону','D06':'Поля','D07':'Пропорции изображения','D08':'Гарнитуры','D09':'Типографическая шкала','D10':'Палитра','D11':'Происхождение композиции','D12':'Логотип и колонтитул','D13':'Контраст','D14':'Количество пунктов','D15':'Длина пункта','D16':'Размер таблицы','D17':'Количество серий','D18':'Заполнение слайда','D19':'Открываемость','D20':'Заглушки','D21':'Пустой слайд','D22':'Редактируемые объекты','D23':'Подписи диаграммы','D24':'Дублирование слайдов','D25':'Минимальный кегль','D26':'Пустые декоративные контейнеры','D27':'Текст пересекает декоративную область шаблона','D28':'Низкая визуальная заполненность рендера','D29':'Слишком похожие соседние композиции'}
+ 'D01':'Элемент вне слайда','D02':'Наложение блоков','D03':'Переполнение текста','D04':'Текст обрезан краем','D05':'Выравнивание по шаблону','D06':'Поля','D07':'Пропорции изображения','D08':'Гарнитуры','D09':'Типографическая шкала','D10':'Палитра','D11':'Происхождение композиции','D12':'Логотип и колонтитул','D13':'Контраст','D14':'Количество пунктов','D15':'Длина пункта','D16':'Размер таблицы','D17':'Количество серий','D18':'Заполнение слайда','D19':'Открываемость','D20':'Заглушки','D21':'Пустой слайд','D22':'Редактируемые объекты','D23':'Подписи диаграммы','D24':'Дублирование слайдов','D25':'Минимальный кегль','D26':'Пустые декоративные контейнеры','D27':'Текст пересекает декоративную область шаблона','D28':'Низкая визуальная заполненность рендера','D29':'Слишком похожие соседние композиции','D30':'Некорректная смысловая схема'}
 PLACEHOLDER=re.compile(r'\blorem ipsum\b|\bXXX\b|\bTODO\b|вставьте текст|\[Text\]',re.I)
 
 
@@ -127,6 +128,9 @@ def audit_scene(scene,design,content,opened=False):
                 if not n.data.get('unit') or not n.data.get('categories'):add('D23',[n])
             if n.kind=='image':
                 add('D07',[n],status='pass',message='Exporter fits image within bounds preserving aspect ratio')
+            if n.kind=='diagram':
+                _,failures=graph_quality(n.data.get('layout','list'),n.data.get('items',[]),n.data.get('graph'))
+                if failures:add('D30',[n],severity='error',evidence={'failures':failures})
         for i,a in enumerate(slide.nodes):
             for b in slide.nodes[i+1:]:
                 dx=min(a.box.x+a.box.w,b.box.x+b.box.w)-max(a.box.x,b.box.x)
@@ -188,7 +192,7 @@ def _render_similarity(left: Path,right: Path) -> float:
 
 
 def _geometry_signature(slide):
-    return tuple((node.kind,node.role,*(round(value*12) for value in (node.box.x,node.box.y,node.box.w,node.box.h))) for node in slide.nodes if node.role!='accent')
+    return tuple((node.kind,node.role,node.data.get('layout') if node.kind=='diagram' else None,*(round(value*12) for value in (node.box.x,node.box.y,node.box.w,node.box.h))) for node in slide.nodes if node.role!='accent')
 
 
 def audit_rendered_deck(scene,previews):

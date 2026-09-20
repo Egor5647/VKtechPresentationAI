@@ -5,6 +5,7 @@ import os
 import re
 from .settings import artifact_path
 from .contracts import PresentationPlan, ContentIR, DesignIR, SceneIR, SceneSlide, Node, Style, Box, SlideRevision, VisualContract
+from .graph_layout import default_diagram,graph_quality
 
 log=logging.getLogger(__name__)
 
@@ -360,7 +361,19 @@ def visual_contract_for(slide) -> VisualContract:
         'fork_join':('Показать разветвление и синхронизацию задач.',['Fork','Параллельные задачи','Join'],['Ветви выходят из Fork и сходятся в Join']),
     }
     goal,entities,relations=presets.get(layout,(slide.visual_brief or slide.message,slide.visual_items[:3],[slide.takeaway] if slide.takeaway else []))
-    return VisualContract(goal=_complete_excerpt(goal,300),entities=[_complete_excerpt(v,80) for v in entities[:6]],relations=[_complete_excerpt(v,100) for v in relations[:6]],forbidden=['Неподписанные устройства','Случайные провода и блоки','Текст внутри растровой иллюстрации','Логотипы и водяные знаки'])
+    existing=getattr(slide.visual_contract,'diagram',None)
+    # Weighted graphs are accepted from the planner only when every source
+    # value is traced to a claim. Otherwise use a visibly marked example.
+    source_weighted=existing and existing.kind==layout and all(
+        node.weight is not None and (node.origin!='source' or node.claim_ids)
+        for node in existing.nodes
+    )
+    diagram=(existing if layout not in {'work_span','critical_path'} and existing and existing.kind==layout else
+             existing if source_weighted else default_diagram(layout,slide.visual_items or entities))
+    if diagram:
+        _,failures=graph_quality(layout,slide.visual_items or entities,diagram)
+        if failures:diagram=default_diagram(layout,slide.visual_items or entities)
+    return VisualContract(goal=_complete_excerpt(goal,300),entities=[_complete_excerpt(v,80) for v in entities[:6]],relations=[_complete_excerpt(v,100) for v in relations[:6]],forbidden=['Неподписанные устройства','Случайные провода и блоки','Текст внутри растровой иллюстрации','Логотипы и водяные знаки'],diagram=diagram)
 
 
 def _archetype(slide,index=0,count=1):
@@ -415,6 +428,13 @@ def validate_plan(plan: PresentationPlan, content: ContentIR, count: int):
         if slide.asset_id and slide.asset_id not in assets: raise ValueError('Unknown asset reference')
         if slide.visual in {'chart','table'} and not slide.dataset_id: raise ValueError('Numeric visuals require a source dataset')
         if slide.visual=='image' and not slide.asset_id: raise ValueError('Image visual requires an asset')
+        if slide.visual_contract.diagram:
+            for node in slide.visual_contract.diagram.nodes:
+                if not set(node.claim_ids)<=set(slide.claim_ids):raise ValueError('Diagram node references a claim outside its slide')
+                if node.weight is not None and node.origin=='source':
+                    if not node.claim_ids:raise ValueError('Source diagram weights require claim_ids')
+                    claim_numbers={float(value.replace(',','.')) for cid in node.claim_ids for value in re.findall(r'\d+(?:[.,]\d+)?',claim_map[cid].text)}
+                    if float(node.weight) not in claim_numbers:raise ValueError('Source diagram weight is absent from referenced claims')
         normalized_title=re.sub(r'\W+',' ',slide.title.casefold()).strip()
         normalized_message=re.sub(r'\W+',' ',slide.message.casefold()).strip()
         if normalized_title in titles:raise ValueError('Plan contains duplicate slide title: '+slide.title)
@@ -793,7 +813,8 @@ def _diagram_layout(ps) -> str:
     if re.search(r'редукц|reduction|бинарн\w* дерев',title):return 'reduction_tree'
     if re.search(r'erew|crew|crcw|режим\w* доступ|set\s*\(',title):return 'memory_access'
     if re.search(r'fork.?join|разветв\w*.*объедин',title) and 'broadcast' not in title:return 'fork_join'
-    if re.search(r'2-аппроксимац|level.by.level.+(?:границ|доказ)',title):return 'level_bound'
+    if re.search(r'2-аппроксимац|level.by.level.+доказ',title):return 'level_bound_proof'
+    if re.search(r'level.by.level|выполнен\w*\s+по\s+уровн',title):return 'level_schedule'
     if re.search(r'work\s+и\s+span',title):return 'work_span'
     if re.search(r'critical path|критическ\w* путь',title):return 'critical_path'
     if re.search(r'формул|неравен|верхн\w* границ|нижн\w* границ',title):return 'formula_focus'
@@ -1002,7 +1023,7 @@ def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, j
             if visual!='none' and not is_cover and not last:
                 kind='diagram' if visual in {'sequence','list','hierarchy'} else visual
                 items=_diagram_items(ps,claims)[:{'A':2,'B':3,'C':3}[variant]]
-                data=datasets[ps.dataset_id].model_dump() if ps.dataset_id else assets[ps.asset_id].model_dump() if ps.asset_id else {'layout':_diagram_layout(ps),'items':items,'accent':slide_accent,'surface':surface}
+                data=datasets[ps.dataset_id].model_dump() if ps.dataset_id else assets[ps.asset_id].model_dump() if ps.asset_id else {'layout':_diagram_layout(ps),'items':items,'accent':slide_accent,'surface':surface,'graph':ps.visual_contract.diagram.model_dump() if ps.visual_contract.diagram else None}
                 visualstyle=_style(style_body,design,p.background);visualstyle.size=_scale_size(design,20,22)
                 visualstyle.fill=surface
                 nodes.append(Node(id=f'{ps.id}-visual',kind=kind,role='visual',box=vb,style=visualstyle,data=data,claim_ids=ps.claim_ids if kind=='diagram' else []))

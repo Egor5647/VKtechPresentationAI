@@ -36,6 +36,7 @@ def _card_font_size(node,w,h,text,minimum=12):
         candidates.append(size);size-=1
     for size in candidates:
         font=font_for(node.style.font,max(1,round(size*96/72))) or ImageFont.load_default(size=max(1,round(size*96/72)))
+        if any(font.getlength(word)>width for paragraph in text.split('\n') for word in paragraph.split()):continue
         lines=0
         for paragraph in text.split('\n'):
             current='';lines+=1
@@ -51,12 +52,25 @@ def _card(out,node,x,y,w,h,text,name,fill,foreground,bold=False):
     sh=out.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,x,y,w,h)
     sh.name=name;sh.fill.solid();sh.fill.fore_color.rgb=RGBColor.from_string(fill)
     sh.line.color.rgb=RGBColor.from_string(node.data.get('accent','0077FF'));sh.line.width=Pt(1.4)
-    sh.shadow.inherit=False
-    tf=sh.text_frame;tf.clear();tf.word_wrap=True;tf.vertical_anchor=MSO_ANCHOR.MIDDLE
+    _plain_shape(sh)
+    tf=sh.text_frame;tf.clear();tf.word_wrap=not (len(text)<=14 and '\n' not in text);tf.vertical_anchor=MSO_ANCHOR.MIDDLE
     tf.margin_left=tf.margin_right=Pt(9);tf.margin_top=tf.margin_bottom=Pt(6)
     p=tf.paragraphs[0];p.text=text;p.alignment=PP_ALIGN.CENTER
     p.font.name=node.style.font;p.font.size=Pt(_card_font_size(node,w,h,text));p.font.bold=bold;p.font.color.rgb=RGBColor.from_string(foreground)
     return sh
+
+
+def _plain_shape(shape):
+    """Suppress theme effects so graph objects render flat in Office and LO."""
+    shape.shadow.inherit=False
+    sppr=shape._element.spPr
+    for child in list(sppr):
+        if child.tag.endswith('effectLst') or child.tag.endswith('effectDag'):sppr.remove(child)
+    sppr.append(OxmlElement('a:effectLst'))
+    style=shape._element.find('p:style',shape._element.nsmap)
+    if style is not None:
+        effect=style.find('a:effectRef',shape._element.nsmap)
+        if effect is not None:effect.set('idx','0')
 
 
 def _arrow(line):
@@ -76,15 +90,25 @@ def _graph_node_bounds(placed,gx,gy,gw,gh):
     return nx,ny,nw,nh
 
 
+def _graph_boundary_point(bounds,placed,toward_x,toward_y):
+    """Intersect a ray from a node centre with its rendered contour."""
+    nx,ny,nw,nh=bounds[placed.id];cx,cy=nx+nw/2,ny+nh/2
+    dx=toward_x-cx;dy=toward_y-cy
+    if not dx and not dy:return cx,cy
+    if placed.shape=='circle':scale=(nw/2)/max(1,(dx*dx+dy*dy)**.5)
+    else:scale=1/max(abs(dx)/(nw/2),abs(dy)/(nh/2))
+    return cx+dx*scale,cy+dy*scale
+
+
 def _render_semantic_graph(out,node,xywh,layout_name,items,accent,surface,dark,white):
-    spec=semantic_graph(layout_name,items)
+    spec=semantic_graph(layout_name,items,node.data.get('graph'))
     if spec is None:return False
     result=layout_graph(spec)
     if result.crossings>spec.rules.max_crossings:raise ValueError(f'Graph layout has {result.crossings} edge crossings')
     x,y,w,h=xywh
     caption_band=round(w*.19) if result.layer_captions and result.direction in {'TB','BT'} else 0
     footer_h=round(h*.14) if result.footer else 0
-    legend_h=round(h*.20) if layout_name=='work_span' else 0
+    legend_h=round(h*.22) if result.kind=='work_span' else round(h*.10) if result.educational_example else 0
     gx=x+caption_band;gy=y+legend_h;gw=w-caption_band;gh=h-footer_h-legend_h
     lookup={placed.id:placed for placed in result.nodes}
     bounds={}
@@ -95,42 +119,49 @@ def _render_semantic_graph(out,node,xywh,layout_name,items,accent,surface,dark,w
         bounds[placed.id]=_graph_node_bounds(placed,gx,gy,gw,gh)
     def center(placed):
         nx,ny,nw,nh=bounds[placed.id];return nx+nw/2,ny+nh/2
-    def boundary_point(placed,toward_x,toward_y):
-        nx,ny,nw,nh=bounds[placed.id];cx,cy=nx+nw/2,ny+nh/2
-        dx=toward_x-cx;dy=toward_y-cy
-        if not dx and not dy:return cx,cy
-        scale=1/max(abs(dx)/(nw/2),abs(dy)/(nh/2))
-        return cx+dx*scale,cy+dy*scale
     def endpoint(source,target,start):
         sx,sy=center(source);tx,ty=center(target)
         if start:
-            px,py=boundary_point(source,tx,ty);return round(px),round(py)
-        px,py=boundary_point(target,sx,sy)
-        distance=max(1,((tx-sx)**2+(ty-sy)**2)**.5);gap=Pt(.75)
+            px,py=_graph_boundary_point(bounds,source,tx,ty);return round(px),round(py)
+        px,py=_graph_boundary_point(bounds,target,sx,sy)
+        distance=max(1,((tx-sx)**2+(ty-sy)**2)**.5);gap=Pt(.5)
         # Stop shortly before the outline so the arrowhead does not merge with
         # the node border.  The marker still clearly points at the target.
         return round(px-(tx-sx)/distance*gap),round(py-(ty-sy)/distance*gap)
+    if result.kind=='level_schedule':
+        centers=_spread_positions(len(result.layer_captions),spec.rules.margin_y+spec.rules.node_height/2,1-spec.rules.margin_y-spec.rules.node_height/2)
+        for index,center_y in enumerate(centers[:-1]):
+            ly=gy+round(((center_y+centers[index+1])/2)*gh)
+            separator=out.shapes.add_connector(MSO_CONNECTOR.STRAIGHT,gx,ly,gx+gw,ly)
+            separator.name=f'{node.id}-level-separator-{index+1}';separator.line.color.rgb=RGBColor.from_string(surface);separator.line.width=Pt(1)
     # Edges are drawn first so nodes remain visually dominant and hide tiny
     # endpoint inaccuracies introduced by PowerPoint's integer coordinates.
     for index,edge in enumerate(result.edges):
         source=lookup[edge.source];target=lookup[edge.target]
         x1,y1=endpoint(source,target,True);x2,y2=endpoint(source,target,False)
-        shape=out.shapes.add_connector(MSO_CONNECTOR.STRAIGHT,x1,y1,x2,y2)
-        shape.name=f'{node.id}-edge-{index+1}';shape.line.color.rgb=RGBColor.from_string(accent if edge.emphasis else dark)
-        shape.line.width=Pt(2.5 if edge.emphasis else 1.25);_arrow(shape.line)
+        if result.kind!='level_bound_proof':
+            shape=out.shapes.add_connector(MSO_CONNECTOR.STRAIGHT,x1,y1,x2,y2)
+            shape.name=f'{node.id}-edge-{index+1}';shape.line.color.rgb=RGBColor.from_string(accent if edge.emphasis else dark)
+            shape.line.width=Pt(2 if edge.emphasis else 1.25);_arrow(shape.line)
+        if edge.label:
+            mx=(x1+x2)//2;my=(y1+y2)//2;tw=Pt(28);th=Pt(18)
+            label=out.shapes.add_textbox(mx-tw//2,my-th//2,tw,th);label.name=f'{node.id}-edge-label-{index+1}'
+            tf=label.text_frame;tf.clear();tf.margin_left=tf.margin_right=0;tf.vertical_anchor=MSO_ANCHOR.MIDDLE
+            p=tf.paragraphs[0];p.text=edge.label;p.alignment=PP_ALIGN.CENTER;p.font.name=node.style.font;p.font.size=Pt(12);p.font.bold=True;p.font.color.rgb=RGBColor.from_string(accent)
     for index,placed in enumerate(result.nodes):
         nx,ny,nw,nh=bounds[placed.id]
         fill=accent if placed.emphasis else surface;foreground=white if placed.emphasis else dark
+        display=placed.label if placed.weight is None else f'{placed.label}\n{placed.weight:g}'
         if placed.shape=='rounded':
-            _card(out,node,nx,ny,nw,nh,placed.label,f'{node.id}-graph-node-{placed.id}',fill,foreground,placed.emphasis)
+            _card(out,node,nx,ny,nw,nh,display,f'{node.id}-graph-node-{placed.id}',fill,foreground,placed.emphasis)
         else:
             shape=out.shapes.add_shape(MSO_SHAPE.OVAL,nx,ny,nw,nh);shape.name=f'{node.id}-graph-node-{placed.id}'
             shape.fill.solid();shape.fill.fore_color.rgb=RGBColor.from_string(fill);shape.line.color.rgb=RGBColor.from_string(accent);shape.line.width=Pt(1.4)
-            shape.shadow.inherit=False
-            if placed.label:
-                tf=shape.text_frame;tf.clear();tf.word_wrap=True;tf.vertical_anchor=MSO_ANCHOR.MIDDLE
+            _plain_shape(shape)
+            if display:
+                tf=shape.text_frame;tf.clear();tf.word_wrap=len(display)>3;tf.vertical_anchor=MSO_ANCHOR.MIDDLE
                 tf.margin_left=tf.margin_right=Pt(2);tf.margin_top=tf.margin_bottom=Pt(1)
-                p=tf.paragraphs[0];p.text=placed.label;p.alignment=PP_ALIGN.CENTER;p.font.name=node.style.font;p.font.bold=True;p.font.size=Pt(max(10,min(16,_card_font_size(node,nw,nh,placed.label,10))));p.font.color.rgb=RGBColor.from_string(foreground)
+                p=tf.paragraphs[0];p.text=display;p.alignment=PP_ALIGN.CENTER;p.font.name=node.style.font;p.font.bold=True;p.font.size=Pt(max(10,min(16,_card_font_size(node,nw,nh,display,10))));p.font.color.rgb=RGBColor.from_string(foreground)
     if result.layer_captions:
         layer_count=len(result.layer_captions)
         centers=_spread_positions(layer_count,spec.rules.margin_y+spec.rules.node_height/2,1-spec.rules.margin_y-spec.rules.node_height/2)
@@ -146,19 +177,23 @@ def _render_semantic_graph(out,node,xywh,layout_name,items,accent,surface,dark,w
         tf=shape.text_frame;tf.clear();tf.word_wrap=True;tf.vertical_anchor=MSO_ANCHOR.MIDDLE;tf.margin_left=tf.margin_right=Pt(2)
         p=tf.paragraphs[0];p.text=result.footer;p.alignment=PP_ALIGN.CENTER;p.font.name=node.style.font
         p.font.size=Pt(min(14,_card_font_size(node,w,footer_h,result.footer,10)));p.font.bold=True;p.font.color.rgb=RGBColor.from_string(accent)
-    if layout_name=='work_span':
-        labels=(items+["Work = сумма задач","Span = критический путь"])[:2]
+    if result.kind=='work_span':
+        metrics=dict(result.metrics);labels=(f'Work W = {metrics.get("work",0):g}',f'Span S = {metrics.get("span",0):g}')
         for index,label in enumerate(labels):
             legend_gap=round(w*.03);legend_w=(w-legend_gap)//2
             lx=x+index*(legend_w+legend_gap)
             marker=out.shapes.add_shape(MSO_SHAPE.OVAL,lx,y+round(legend_h*.33),round(legend_h*.13),round(legend_h*.13))
             marker.name=f'{node.id}-legend-marker-{index+1}';marker.fill.solid();marker.fill.fore_color.rgb=RGBColor.from_string(accent if index else surface)
-            marker.line.color.rgb=RGBColor.from_string(accent);marker.line.width=Pt(1.2);marker.shadow.inherit=False
+            marker.line.color.rgb=RGBColor.from_string(accent);marker.line.width=Pt(1.2);_plain_shape(marker)
             label_x=lx+round(legend_h*.18)
             shape=out.shapes.add_textbox(label_x,y,legend_w-round(legend_h*.18),legend_h);shape.name=f'{node.id}-legend-{index+1}'
             tf=shape.text_frame;tf.clear();tf.word_wrap=True;tf.vertical_anchor=MSO_ANCHOR.MIDDLE;tf.margin_left=tf.margin_right=Pt(2)
             p=tf.paragraphs[0];p.text=label;p.font.name=node.style.font
             p.font.size=Pt(min(11,_card_font_size(node,legend_w-round(legend_h*.18),legend_h,label,9)));p.font.bold=True;p.font.color.rgb=RGBColor.from_string(accent if index else dark)
+    if result.educational_example:
+        label_h=max(Pt(14),round(legend_h*.28));label=out.shapes.add_textbox(x,y,w,label_h);label.name=f'{node.id}-example-label'
+        tf=label.text_frame;tf.clear();tf.margin_left=tf.margin_right=0
+        p=tf.paragraphs[0];p.text=result.example_label or 'Учебный пример';p.alignment=PP_ALIGN.RIGHT;p.font.name=node.style.font;p.font.size=Pt(10);p.font.color.rgb=RGBColor.from_string(accent)
     return True
 
 
@@ -526,6 +561,59 @@ def chart_svg(node,variant):
     return ''.join(parts)
 
 
+def graph_svg(node):
+    """Render the same semantic layout used by PPTX as accessible SVG."""
+    from .audit import contrast
+    layout_name=node.data.get('layout','list');items=node.data.get('items',[])
+    spec=semantic_graph(layout_name,items,node.data.get('graph'))
+    if spec is None:return ''
+    result=layout_graph(spec);accent=node.data.get('accent','0077FF');surface=node.data.get('surface') or node.style.fill or 'E8EEF6'
+    dark='202020' if contrast('202020',surface)>=4.5 else 'FFFFFF';on_accent='FFFFFF' if contrast('FFFFFF',accent)>=3 else '202020'
+    caption=105 if result.layer_captions else 15;top=45 if result.kind=='work_span' else 30 if result.educational_example else 15;footer=34 if result.footer else 10
+    gx,gy,gw,gh=caption,top,600-caption-15,300-top-footer
+    bounds={}
+    for placed in result.nodes:
+        x=gx+placed.x*gw;y=gy+placed.y*gh;w=placed.w*gw;h=placed.h*gh
+        if placed.shape=='circle':
+            d=min(w,h);x+=(w-d)/2;y+=(h-d)/2;w=h=d
+        bounds[placed.id]=(x,y,w,h)
+    def center(placed):
+        x,y,w,h=bounds[placed.id];return x+w/2,y+h/2
+    def boundary(placed,toward):
+        x,y,w,h=bounds[placed.id];cx,cy=x+w/2,y+h/2;dx,dy=toward[0]-cx,toward[1]-cy
+        if not dx and not dy:return cx,cy
+        scale=(w/2)/max(1,(dx*dx+dy*dy)**.5) if placed.shape=='circle' else 1/max(abs(dx)/(w/2),abs(dy)/(h/2))
+        return cx+dx*scale,cy+dy*scale
+    lookup={placed.id:placed for placed in result.nodes}
+    title=html.escape(node.data.get('description') or layout_name)
+    marker_id=html.escape(node.id,quote=True)
+    parts=[f'<svg viewBox="0 0 600 300" role="img" aria-label="{title}"><title>{title}</title>',f'<defs><marker id="arrow-dark-{marker_id}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#{dark}"/></marker><marker id="arrow-accent-{marker_id}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#{accent}"/></marker></defs>']
+    if result.kind=='level_schedule' and len(result.layer_captions)>1:
+        centers=_spread_positions(len(result.layer_captions),spec.rules.margin_y+spec.rules.node_height/2,1-spec.rules.margin_y-spec.rules.node_height/2)
+        for index in range(len(centers)-1):
+            y=gy+(centers[index]+centers[index+1])/2*gh;parts.append(f'<line x1="{gx}" y1="{y:.1f}" x2="{gx+gw}" y2="{y:.1f}" stroke="#{surface}"/>')
+    for edge in result.edges:
+        source=lookup[edge.source];target=lookup[edge.target];sc=center(source);tc=center(target);x1,y1=boundary(source,tc);x2,y2=boundary(target,sc)
+        color=accent if edge.emphasis else dark;width=3 if edge.emphasis else 1.7
+        if result.kind!='level_bound_proof':parts.append(f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" stroke="#{color}" stroke-width="{width}" marker-end="url(#arrow-{"accent" if edge.emphasis else "dark"}-{marker_id})"/>')
+        if edge.label:parts.append(f'<text x="{(x1+x2)/2:.1f}" y="{(y1+y2)/2-5:.1f}" font-size="13" font-weight="700" text-anchor="middle" fill="#{accent}">{html.escape(edge.label)}</text>')
+    for placed in result.nodes:
+        x,y,w,h=bounds[placed.id];fill=accent if placed.emphasis else surface;color=on_accent if placed.emphasis else dark
+        if placed.shape=='circle':parts.append(f'<circle cx="{x+w/2:.1f}" cy="{y+h/2:.1f}" r="{w/2:.1f}" fill="#{fill}" stroke="#{accent}" stroke-width="1.5"/>')
+        else:parts.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="{h:.1f}" rx="10" fill="#{fill}" stroke="#{accent}" stroke-width="1.5"/>')
+        lines=[placed.label]+([f'{placed.weight:g}'] if placed.weight is not None else []);base=y+h/2-(len(lines)-1)*7
+        for index,value in enumerate(lines):parts.append(f'<text x="{x+w/2:.1f}" y="{base+index*15:.1f}" font-size="13" font-weight="700" text-anchor="middle" dominant-baseline="middle" fill="#{color}">{html.escape(value)}</text>')
+    if result.layer_captions:
+        centers=_spread_positions(len(result.layer_captions),spec.rules.margin_y+spec.rules.node_height/2,1-spec.rules.margin_y-spec.rules.node_height/2)
+        if result.direction=='BT':centers=list(reversed(centers))
+        for label,center_y in zip(result.layer_captions,centers):parts.append(f'<text x="8" y="{gy+center_y*gh:.1f}" font-size="13" font-weight="700" dominant-baseline="middle" fill="#{accent}">{html.escape(label)}</text>')
+    if result.kind=='work_span':
+        metrics=dict(result.metrics);parts.append(f'<text x="15" y="20" font-size="13" font-weight="700" fill="#{dark}">Work W = {metrics.get("work",0):g}</text><text x="210" y="20" font-size="13" font-weight="700" fill="#{accent}">Span S = {metrics.get("span",0):g}</text>')
+    if result.educational_example:parts.append(f'<text x="585" y="20" font-size="11" text-anchor="end" fill="#{accent}">{html.escape(result.example_label or "Учебный пример")}</text>')
+    if result.footer:parts.append(f'<text x="300" y="292" font-size="13" font-weight="700" text-anchor="middle" fill="#{accent}">{html.escape(result.footer)}</text>')
+    parts.append('</svg>');return ''.join(parts)
+
+
 def export_html(scene,path,backgrounds=None):
     slides=[]
     for i,slide in enumerate(scene.slides):
@@ -542,6 +630,8 @@ def export_html(scene,path,backgrounds=None):
                 data=n.data;headers=[data['title']]+[name+' ('+data['unit']+')' for name in data['series']]
                 rows=[headers]+[[cat]+[str(v[j]) for v in data['series'].values()] for j,cat in enumerate(data['categories'])]
                 body='<table>'+''.join('<tr>'+''.join(f'<{"th" if ri==0 else "td"}>{html.escape(cell)}</{"th" if ri==0 else "td"}>' for cell in row)+'</tr>' for ri,row in enumerate(rows))+'</table>'
+            elif n.kind=='diagram' and semantic_graph(n.data.get('layout','list'),n.data.get('items',[]),n.data.get('graph')):
+                body=graph_svg(n)
             elif n.kind in {'diagram','smartart'}:
                 layout=n.data.get('layout','list');orientation=' vertical' if layout=='sequence' and n.box.w/n.box.h<1.6 else ''
                 body='<ol class="diagram '+layout+orientation+'">'+''.join('<li>'+html.escape(t)+'</li>' for t in n.data.get('items',[]))+'</ol>'
