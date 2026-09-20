@@ -17,7 +17,9 @@ from pptx.chart.data import CategoryChartData
 from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
 from pptx.enum.shapes import MSO_SHAPE, MSO_CONNECTOR
 from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+from pptx.oxml.xmlchemy import OxmlElement
 from .contracts import SceneIR, DesignIR
+from .graph_layout import semantic_graph,layout_graph
 from .opc import Package, NS, serialize, relpath
 from .smartart import inject
 from .settings import artifact_path
@@ -56,6 +58,87 @@ def _card(out,node,x,y,w,h,text,name,fill,foreground,bold=False):
     return sh
 
 
+def _arrow(line):
+    """Add a small native PowerPoint arrowhead to a connector."""
+    ln=line._get_or_add_ln()
+    for existing in list(ln):
+        if existing.tag.endswith('tailEnd'):ln.remove(existing)
+    arrow=OxmlElement('a:tailEnd');arrow.set('type','triangle');arrow.set('w','sm');arrow.set('len','sm');ln.append(arrow)
+
+
+def _render_semantic_graph(out,node,xywh,layout_name,items,accent,surface,dark,white):
+    spec=semantic_graph(layout_name,items)
+    if spec is None:return False
+    result=layout_graph(spec)
+    if result.crossings>spec.rules.max_crossings:raise ValueError(f'Graph layout has {result.crossings} edge crossings')
+    x,y,w,h=xywh
+    caption_band=round(w*.19) if result.layer_captions and result.direction in {'TB','BT'} else 0
+    footer_h=round(h*.14) if result.footer else 0
+    legend_h=round(h*.20) if layout_name=='work_span' else 0
+    gx=x+caption_band;gy=y+legend_h;gw=w-caption_band;gh=h-footer_h-legend_h
+    lookup={placed.id:placed for placed in result.nodes}
+    def center(placed):return gx+round((placed.x+placed.w/2)*gw),gy+round((placed.y+placed.h/2)*gh)
+    def endpoint(source,target,start):
+        sx,sy=center(source);tx,ty=center(target)
+        if result.direction=='LR':return (sx+round(source.w*gw/2),sy) if start else (tx-round(target.w*gw/2),ty)
+        if result.direction=='BT':return (sx,sy-round(source.h*gh/2)) if start else (tx,ty+round(target.h*gh/2))
+        return (sx,sy+round(source.h*gh/2)) if start else (tx,ty-round(target.h*gh/2))
+    # Edges are drawn first so nodes remain visually dominant and hide tiny
+    # endpoint inaccuracies introduced by PowerPoint's integer coordinates.
+    for index,edge in enumerate(result.edges):
+        source=lookup[edge.source];target=lookup[edge.target]
+        x1,y1=endpoint(source,target,True);x2,y2=endpoint(source,target,False)
+        shape=out.shapes.add_connector(MSO_CONNECTOR.STRAIGHT,x1,y1,x2,y2)
+        shape.name=f'{node.id}-edge-{index+1}';shape.line.color.rgb=RGBColor.from_string(accent if edge.emphasis else dark)
+        shape.line.width=Pt(2.8 if edge.emphasis else 1.35);_arrow(shape.line)
+    for index,placed in enumerate(result.nodes):
+        nx=gx+round(placed.x*gw);ny=gy+round(placed.y*gh);nw=round(placed.w*gw);nh=round(placed.h*gh)
+        fill=accent if placed.emphasis else surface;foreground=white if placed.emphasis else dark
+        if placed.shape=='rounded':
+            _card(out,node,nx,ny,nw,nh,placed.label,f'{node.id}-graph-node-{placed.id}',fill,foreground,placed.emphasis)
+        else:
+            shape=out.shapes.add_shape(MSO_SHAPE.OVAL,nx,ny,nw,nh);shape.name=f'{node.id}-graph-node-{placed.id}'
+            shape.fill.solid();shape.fill.fore_color.rgb=RGBColor.from_string(fill);shape.line.color.rgb=RGBColor.from_string(accent);shape.line.width=Pt(1.4)
+            if placed.label:
+                tf=shape.text_frame;tf.clear();tf.word_wrap=True;tf.vertical_anchor=MSO_ANCHOR.MIDDLE
+                tf.margin_left=tf.margin_right=Pt(2);tf.margin_top=tf.margin_bottom=Pt(1)
+                p=tf.paragraphs[0];p.text=placed.label;p.alignment=PP_ALIGN.CENTER;p.font.name=node.style.font;p.font.bold=True;p.font.size=Pt(max(10,min(16,_card_font_size(node,nw,nh,placed.label,10))));p.font.color.rgb=RGBColor.from_string(foreground)
+    if result.layer_captions:
+        layer_count=len(result.layer_captions)
+        centers=_spread_positions(layer_count,spec.rules.margin_y+spec.rules.node_height/2,1-spec.rules.margin_y-spec.rules.node_height/2)
+        if result.direction=='BT':centers=list(reversed(centers))
+        for index,(label,center_y) in enumerate(zip(result.layer_captions,centers)):
+            tx=x;ty=gy+round((center_y-.08)*gh);tw=max(Pt(40),caption_band-round(w*.02));th=round(.16*gh)
+            shape=out.shapes.add_textbox(tx,ty,tw,th);shape.name=f'{node.id}-layer-caption-{index+1}'
+            tf=shape.text_frame;tf.clear();tf.word_wrap=True;tf.vertical_anchor=MSO_ANCHOR.MIDDLE;tf.margin_left=tf.margin_right=0
+            p=tf.paragraphs[0];p.text=label;p.alignment=PP_ALIGN.LEFT;p.font.name=node.style.font
+            p.font.size=Pt(min(13,_card_font_size(node,tw,th,label,10)));p.font.bold=True;p.font.color.rgb=RGBColor.from_string(accent)
+    if result.footer:
+        shape=out.shapes.add_textbox(x,y+h-footer_h,w,footer_h);shape.name=f'{node.id}-graph-footer'
+        tf=shape.text_frame;tf.clear();tf.word_wrap=True;tf.vertical_anchor=MSO_ANCHOR.MIDDLE;tf.margin_left=tf.margin_right=Pt(2)
+        p=tf.paragraphs[0];p.text=result.footer;p.alignment=PP_ALIGN.CENTER;p.font.name=node.style.font
+        p.font.size=Pt(min(14,_card_font_size(node,w,footer_h,result.footer,10)));p.font.bold=True;p.font.color.rgb=RGBColor.from_string(accent)
+    if layout_name=='work_span':
+        labels=(items+["Work = сумма задач","Span = критический путь"])[:2]
+        for index,label in enumerate(labels):
+            legend_gap=round(w*.03);legend_w=(w-legend_gap)//2
+            lx=x+index*(legend_w+legend_gap)
+            marker=out.shapes.add_shape(MSO_SHAPE.OVAL,lx,y+round(legend_h*.33),round(legend_h*.13),round(legend_h*.13))
+            marker.name=f'{node.id}-legend-marker-{index+1}';marker.fill.solid();marker.fill.fore_color.rgb=RGBColor.from_string(accent if index else surface)
+            marker.line.color.rgb=RGBColor.from_string(accent);marker.line.width=Pt(1.2)
+            label_x=lx+round(legend_h*.18)
+            shape=out.shapes.add_textbox(label_x,y,legend_w-round(legend_h*.18),legend_h);shape.name=f'{node.id}-legend-{index+1}'
+            tf=shape.text_frame;tf.clear();tf.word_wrap=True;tf.vertical_anchor=MSO_ANCHOR.MIDDLE;tf.margin_left=tf.margin_right=Pt(2)
+            p=tf.paragraphs[0];p.text=label;p.font.name=node.style.font
+            p.font.size=Pt(min(11,_card_font_size(node,legend_w-round(legend_h*.18),legend_h,label,9)));p.font.bold=True;p.font.color.rgb=RGBColor.from_string(accent if index else dark)
+    return True
+
+
+def _spread_positions(count,start,end):
+    if count<=1:return [(start+end)/2]
+    return [start+(end-start)*index/(count-1) for index in range(count)]
+
+
 def _diagram(out,node,xywh):
     from .audit import contrast
     x,y,w,h=xywh;items=node.data.get('items',[])[:4];layout=node.data.get('layout','list')
@@ -79,6 +162,7 @@ def _diagram(out,node,xywh):
         fitted=_card_font_size(node,tw,th,value,minimum=12)
         p.font.size=Pt(min(fitted,size or fitted));p.font.bold=bold;p.font.color.rgb=RGBColor.from_string(color)
         return shape
+    if _render_semantic_graph(out,node,xywh,layout,items,accent,surface,dark,white):return
     if layout=='pram_reality':
         # A semantic, fully editable comparison.  The labels are part of the
         # diagram grammar, so the renderer never asks a raster model to invent
