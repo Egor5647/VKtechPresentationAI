@@ -10,6 +10,7 @@ frontend/dist/
 tmp/
 output/
 .local/
+.idea/
 *.egg-info/
 *.log
 *.tsbuildinfo

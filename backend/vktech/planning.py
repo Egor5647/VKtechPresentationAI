@@ -276,7 +276,7 @@ def normalize_plan(plan: PresentationPlan) -> PresentationPlan:
     """Repair optional visual intents and enforce a useful native-visual quota."""
     result=plan.model_copy(deep=True)
     for slide in result.slides:
-        slide.title=_canonicalize_math(slide.title)
+        slide.title=_clean_text(_canonicalize_math(slide.title))
         slide.message=_dedupe_sentences(slide.message)
         slide.balanced_message=_dedupe_sentences(slide.balanced_message)
         slide.takeaway=_dedupe_sentences(slide.takeaway)
@@ -362,6 +362,11 @@ def visual_contract_for(slide) -> VisualContract:
     }
     goal,entities,relations=presets.get(layout,(slide.visual_brief or slide.message,slide.visual_items[:3],[slide.takeaway] if slide.takeaway else []))
     existing=getattr(slide.visual_contract,'diagram',None)
+    if existing and existing.kind==layout:
+        labels=[node.label.strip() for node in existing.nodes]
+        generic=all(re.fullmatch(r'(?:[A-ZА-Я]\d?|\d+|[+Σ])',label,re.I) for label in labels)
+        generic=generic or (layout=='fork_join' and sum(bool(re.fullmatch(r'\d+',label)) for label in labels)>=2)
+        if generic:existing=None
     # Weighted graphs are accepted from the planner only when every source
     # value is traced to a claim. Otherwise use a visibly marked example.
     source_weighted=existing and existing.kind==layout and all(
@@ -726,7 +731,12 @@ def _style(base,design,background,role='body',align='left'):
 
 def _clean_text(value):
     value=re.sub(r'\*{2,}|`+','',value)
-    return re.sub(r'\s+',' ',value).strip(' •–—-')
+    # PDF extraction can splice an isolated CJK glyph into a Russian token
+    # (for example «В材»). Remove only such mixed-script tokens.
+    if re.search(r'[А-Яа-яЁё]',value) and re.search(r'[\u3400-\u9fff]',value):
+        value=re.sub(r'(?<!\S)[\w-]*[\u3400-\u9fff][\w-]*[.,;:]?', '', value)
+    value=re.sub(r'\s+',' ',value).strip(' •–—-')
+    return re.sub(r'(^|\s)[.,;:]+(?=\s|$)',r'\1',value).strip()
 
 
 def _complete_excerpt(value,limit=105):
@@ -917,6 +927,8 @@ def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, j
         slides=[]
         for si,ps in enumerate(plan.slides):
             visual='table' if ps.dataset_id and variant=='C' else 'chart' if ps.dataset_id else ps.visual
+            diagram_layout=_diagram_layout(ps)
+            semantic_diagram=diagram_layout in {'fork_join','reduction_tree','work_span','critical_path','level_schedule','level_bound_proof'}
             is_cover=ps.role=='cover' or si==0
             last=si==len(plan.slides)-1
             if (is_cover or last) and dark:
@@ -974,23 +986,29 @@ def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, j
                     elif variant=='B':
                         lead=body_style.model_copy(deep=True);lead.size=_scale_size(design,20,22)
                         left=.37 if branded_slide else .41
-                        nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=left,h=.27),style=lead,text=lead_text,claim_ids=ps.claim_ids))
-                        if supports:
+                        if semantic_diagram:
+                            nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=content_right-.07,h=.17),style=lead,text=lead_text,claim_ids=ps.claim_ids))
+                            vb=Box(x=.07,y=top+.20,w=content_right-.09,h=max(.34,.90-(top+.20)))
+                        else:
+                            nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=left,h=.27),style=lead,text=lead_text,claim_ids=ps.claim_ids))
+                            vb=Box(x=.50,y=top,w=content_right-.50,h=.58)
+                        if supports and not semantic_diagram:
                             support_style=body_style.model_copy(deep=True);support_style.size=_scale_size(design,18,18)
                             support_top=top+.31
                             support_h=min(.28,max(.12,.90-support_top))
                             nodes.append(Node(id=f'{ps.id}-support-1',kind='text',role='support',box=Box(x=.06,y=support_top,w=left,h=support_h),style=support_style,text=supports[0],claim_ids=ps.claim_ids))
-                        vb=Box(x=.50,y=top,w=content_right-.50,h=.58)
                     else:
                         lead=body_style.model_copy(deep=True);lead.size=_scale_size(design,18,18)
-                        nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=.46,h=.25),style=lead,text=lead_text,claim_ids=ps.claim_ids))
+                        lead_width=content_right-.07 if semantic_diagram else .46
+                        lead_height=.17 if semantic_diagram else .25
+                        nodes.append(Node(id=f'{ps.id}-body-1',kind='text',role='body',box=Box(x=.06,y=top,w=lead_width,h=lead_height),style=lead,text=lead_text,claim_ids=ps.claim_ids))
                         support_style=body_style.model_copy(deep=True);support_style.size=_scale_size(design,18,18)
                         visible_supports=supports[:2] if sum(map(len,supports[:2]))<=120 else supports[:1]
                         support_top=top+.29;available=max(.11,.90-support_top)
                         support_h=min(.22,(available-.02*max(0,len(visible_supports)-1))/max(1,len(visible_supports)))
-                        for idx,text in enumerate(visible_supports):
+                        for idx,text in enumerate(visible_supports if not semantic_diagram else []):
                             nodes.append(Node(id=f'{ps.id}-support-{idx+1}',kind='text',role='support',box=Box(x=.06,y=support_top+idx*(support_h+.02),w=.46,h=support_h),style=support_style,text=text,claim_ids=ps.claim_ids))
-                        vb=Box(x=.56,y=top,w=.38,h=.50)
+                        vb=Box(x=.07,y=top+.20,w=content_right-.09,h=max(.34,.90-(top+.20))) if semantic_diagram else Box(x=.56,y=top,w=.38,h=.50)
                 else:
                     lead_w=content_right-.07
                     if variant=='A':
@@ -1023,7 +1041,7 @@ def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, j
             if visual!='none' and not is_cover and not last:
                 kind='diagram' if visual in {'sequence','list','hierarchy'} else visual
                 items=_diagram_items(ps,claims)[:{'A':2,'B':3,'C':3}[variant]]
-                data=datasets[ps.dataset_id].model_dump() if ps.dataset_id else assets[ps.asset_id].model_dump() if ps.asset_id else {'layout':_diagram_layout(ps),'items':items,'accent':slide_accent,'surface':surface,'graph':ps.visual_contract.diagram.model_dump() if ps.visual_contract.diagram else None}
+                data=datasets[ps.dataset_id].model_dump() if ps.dataset_id else assets[ps.asset_id].model_dump() if ps.asset_id else {'layout':diagram_layout,'items':items,'accent':slide_accent,'surface':surface,'graph':ps.visual_contract.diagram.model_dump() if ps.visual_contract.diagram else None}
                 visualstyle=_style(style_body,design,p.background);visualstyle.size=_scale_size(design,20,22)
                 visualstyle.fill=surface
                 nodes.append(Node(id=f'{ps.id}-visual',kind=kind,role='visual',box=vb,style=visualstyle,data=data,claim_ids=ps.claim_ids if kind=='diagram' else []))

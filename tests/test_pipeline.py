@@ -129,6 +129,13 @@ def test_density_fit_removes_repeated_sentences_and_repairs_pdf_formula(plan):
     assert len(fitted.takeaway)<len(fitted.balanced_message)<len(fitted.message)
 
 
+def test_editorial_cleanup_removes_isolated_mixed_script_pdf_artifact(plan):
+    draft=plan.model_copy(deep=True)
+    draft.slides[0].title='В材. Структура и цели лекции'
+    cleaned=normalize_plan(draft).slides[0].title
+    assert cleaned=='Структура и цели лекции'
+
+
 def test_editorial_cleanup_preserves_mathematical_optimum_marker(content,plan):
     draft=plan.model_copy(deep=True);draft.slides[1].message='Граница T_level ≤ 2T* сохраняется.'
     assert '2T*' in enrich_plan(draft,content).slides[1].message

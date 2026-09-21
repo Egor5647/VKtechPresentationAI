@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Literal
 
 from .contracts import DiagramSpec
@@ -231,19 +232,21 @@ def layout_graph(spec: GraphSpec) -> GraphLayout:
 
 def _rules(kind: str):
     return {
-        'fork_join':GraphRules(node_width=.22,node_height=.18),
-        'reduction_tree':GraphRules(direction='BT',node_width=.14,node_height=.20),
-        'work_span':GraphRules(direction='LR',node_width=.17,node_height=.18),
-        'critical_path':GraphRules(direction='LR',node_width=.18,node_height=.18),
-        'level_schedule':GraphRules(node_width=.12,node_height=.16),
-        'level_bound_proof':GraphRules(direction='LR',node_width=.27,node_height=.20,margin_x=.04,min_occupancy=.15),
+        'fork_join':GraphRules(margin_x=.03,margin_y=.04,node_width=.27,node_height=.19),
+        'reduction_tree':GraphRules(direction='BT',margin_x=.03,margin_y=.04,node_width=.20,node_height=.18),
+        'work_span':GraphRules(direction='LR',margin_x=.03,margin_y=.04,node_width=.22,node_height=.19),
+        'critical_path':GraphRules(direction='LR',margin_x=.03,margin_y=.04,node_width=.22,node_height=.19),
+        'level_schedule':GraphRules(margin_x=.03,margin_y=.04,node_width=.23,node_height=.17),
+        'level_bound_proof':GraphRules(direction='LR',node_width=.29,node_height=.22,margin_x=.02,margin_y=.04,min_occupancy=.15),
     }[kind]
 
 
 def _from_description(description: DiagramSpec) -> GraphSpec:
     kind=description.kind;nodes=[]
     for item in description.nodes:
-        shape='rounded' if item.role in {'state','bound'} or (kind in {'work_span','critical_path'} and item.weight is not None) else 'circle'
+        # A single vertex grammar prevents the accidental mix of stretched
+        # ovals, circles and boxes that made older diagrams look improvised.
+        shape='rounded'
         nodes.append(GraphNode(item.id,item.label,item.layer,False,shape,item.weight,item.role,item.origin))
     edges=tuple(GraphEdge(edge.source,edge.target,False,edge.label) for edge in description.edges);captions=()
     if kind=='level_schedule':
@@ -261,17 +264,49 @@ def _from_description(description: DiagramSpec) -> GraphSpec:
     return spec
 
 
+def _short_concept(value: str,max_words=3) -> str:
+    """Turn a source-backed visual item into a compact vertex label."""
+    value=re.sub(r'^\s*(?:этап\s*\d+|fork|join|результат|ready[- ]?вершина)\s*:\s*','',value,flags=re.I)
+    value=re.sub(r'\([^)]{18,}\)','',value).strip(' .:;—–-')
+    replacements=(
+        (r'создани\w*\s+независим\w*\s+ветв\w*','Независимая задача'),
+        (r'слияни\w*\s+результат\w*','Сведение результата'),
+        (r'выполнен\w*\s+после\s+предшественник\w*','Готовая задача'),
+        (r'сложени\w*\s+пар\w*','Сложение пары'),
+        (r'копировани\w*','Копирование'),
+    )
+    for pattern,label in replacements:
+        if re.search(pattern,value,re.I):return label
+    words=value.split()
+    result=' '.join(words[:max_words])
+    return result[:28].rstrip(' ,:;') or 'Задача'
+
+
+def _semantic_tasks(items: list[str],fallback: tuple[str,...],count: int) -> list[str]:
+    labels=[]
+    for item in items:
+        label=_short_concept(item)
+        if label and label.casefold() not in {x.casefold() for x in labels}:labels.append(label)
+    for label in fallback:
+        if label.casefold() not in {x.casefold() for x in labels}:labels.append(label)
+    return labels[:count]
+
+
 def default_diagram(layout: str,items: list[str]) -> DiagramSpec | None:
     if layout=='level_bound':layout='level_schedule'
     if layout=='fork_join':
-        return DiagramSpec(kind=layout,nodes=[{'id':'fork','label':'Fork','layer':0,'role':'state'},*({'id':f'b{i}','label':str(i),'layer':1} for i in range(1,4)),{'id':'join','label':'Join','layer':2,'role':'state'}],edges=[*({'source':'fork','target':f'b{i}'} for i in range(1,4)),*({'source':f'b{i}','target':'join'} for i in range(1,4))],footer='Готовность после завершения всех ветвей')
+        branch_items=[item for item in items if not re.match(r'\s*(?:fork|join)\s*:',item,re.I)]
+        labels=_semantic_tasks(branch_items,('Независимая задача','Параллельная работа','Готовая задача'),3)
+        return DiagramSpec(kind=layout,nodes=[{'id':'fork','label':'Создать ветви','layer':0,'role':'state'},*({'id':f'b{i}','label':label,'layer':1} for i,label in enumerate(labels,1)),{'id':'join','label':'Свести результат','layer':2,'role':'state'}],edges=[*({'source':'fork','target':f'b{i}'} for i in range(1,4)),*({'source':f'b{i}','target':'join'} for i in range(1,4))],footer='Продолжение — после завершения всех ветвей')
     if layout=='reduction_tree':
-        return DiagramSpec(kind=layout,nodes=[*({'id':f'a{i}','label':f'A{i}','layer':0,'role':'input'} for i in range(1,5)),{'id':'p1','label':'+','layer':1,'role':'operation'},{'id':'p2','label':'+','layer':1,'role':'operation'},{'id':'sum','label':'Σ','layer':2,'role':'result'}],edges=[{'source':'a1','target':'p1'},{'source':'a2','target':'p1'},{'source':'a3','target':'p2'},{'source':'a4','target':'p2'},{'source':'p1','target':'sum'},{'source':'p2','target':'sum'}],footer='Высота дерева равна log n')
+        return DiagramSpec(kind=layout,nodes=[*({'id':f'a{i}','label':f'a{chr(8320+i)}','layer':0,'role':'input','origin':'derived'} for i in range(1,5)),{'id':'p1','label':'a₁ + a₂','layer':1,'role':'operation','origin':'derived'},{'id':'p2','label':'a₃ + a₄','layer':1,'role':'operation','origin':'derived'},{'id':'sum','label':'Σ aᵢ','layer':2,'role':'result','origin':'derived'}],edges=[{'source':'a1','target':'p1'},{'source':'a2','target':'p1'},{'source':'a3','target':'p2'},{'source':'a4','target':'p2'},{'source':'p1','target':'sum'},{'source':'p2','target':'sum'}],footer='На каждом уровне число активных значений уменьшается вдвое')
     if layout in {'work_span','critical_path'}:
         weights=(2,3,2,2,4,1,2);ids=('a','b','c','d','e','f','g');edges=(('a','b'),('a','c'),('b','d'),('b','e'),('c','e'),('d','f'),('e','f'),('e','g'))
-        return DiagramSpec(kind=layout,nodes=[{'id':node_id,'label':node_id.upper(),'weight':weight,'origin':'example'} for node_id,weight in zip(ids,weights)],edges=[{'source':a,'target':b} for a,b in edges],educational_example=True,example_label='Учебный пример',footer='T_P ≥ max(W/P, S)' if layout=='work_span' else '',highlighted_path=['a','b','e','g'])
+        labels=('Старт','Разбор A','Разбор B','Расчёт A','Расчёт B','Сведение','Результат')
+        return DiagramSpec(kind=layout,nodes=[{'id':node_id,'label':label,'weight':weight,'origin':'example'} for node_id,label,weight in zip(ids,labels,weights)],edges=[{'source':a,'target':b} for a,b in edges],educational_example=True,example_label='Учебный пример',footer='T_P ≥ max(W/P, S)' if layout=='work_span' else '',highlighted_path=['a','b','e','g'])
     if layout=='level_schedule':
-        return DiagramSpec(kind=layout,nodes=[{'id':'a','label':'A','layer':0},{'id':'b','label':'B','layer':0},{'id':'c','label':'C','layer':1},{'id':'d','label':'D','layer':1},{'id':'e','label':'E','layer':1},{'id':'f','label':'F','layer':2},{'id':'g','label':'G','layer':2}],edges=[{'source':'a','target':'c'},{'source':'a','target':'d'},{'source':'b','target':'d'},{'source':'b','target':'e'},{'source':'c','target':'f'},{'source':'d','target':'f'},{'source':'d','target':'g'},{'source':'e','target':'g'}],footer=items[0] if items else 'Выполнение завершается по уровням')
+        labels=('Чтение A','Чтение B','Вычисление A','Вычисление B','Вычисление C','Сведение A','Сведение B')
+        return DiagramSpec(kind=layout,nodes=[{'id':node_id,'label':label,'layer':layer,'origin':'derived'} for node_id,label,layer in zip(('a','b','c','d','e','f','g'),labels,(0,0,1,1,1,2,2))],edges=[{'source':'a','target':'c'},{'source':'a','target':'d'},{'source':'b','target':'d'},{'source':'b','target':'e'},{'source':'c','target':'f'},{'source':'d','target':'f'},{'source':'d','target':'g'},{'source':'e','target':'g'}],footer=items[0] if items else 'Следующий уровень начинается после завершения предыдущего')
     if layout=='level_bound_proof':
         return DiagramSpec(kind=layout,nodes=[{'id':'actual','label':'T_level','layer':0,'role':'bound'},{'id':'decomposition','label':'W/P + S','layer':1,'role':'bound'},{'id':'optimum','label':'2T*','layer':2,'role':'bound'}],edges=[{'source':'actual','target':'decomposition','label':'≤'},{'source':'decomposition','target':'optimum','label':'≤'}],footer='Количество уровней не превышает длину критического пути')
     return None

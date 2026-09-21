@@ -4,8 +4,8 @@ import pytest
 from pydantic import ValidationError
 
 from vktech.contracts import DiagramSpec
-from vktech.export import _graph_boundary_point, _graph_node_bounds
-from vktech.graph_layout import graph_quality, layout_graph, semantic_graph
+from vktech.export import _graph_boundary_point, _graph_node_bounds, _math_display
+from vktech.graph_layout import PlacedNode, graph_quality, layout_graph, semantic_graph
 
 
 GRAPH_TYPES=(
@@ -72,11 +72,23 @@ def test_reduction_tree_centers_each_parent_between_children():
 
 
 def test_circle_projection_and_diagonal_boundary_are_exact():
-    node=next(node for node in layout_graph(semantic_graph('fork_join',[])).nodes if node.shape=='circle')
+    node=PlacedNode('circle','A',.1,.1,.2,.4,False,'circle',0)
     x,y,w,h=_graph_node_bounds(node,100,200,900,360);bounds={node.id:(x,y,w,h)}
     assert w==h and x>=100 and y>=200
     px,py=_graph_boundary_point(bounds,node,x+w*2,y+h*2)
     assert math.hypot(px-(x+w/2),py-(y+h/2))==pytest.approx(w/2)
+
+
+@pytest.mark.parametrize('name',('fork_join','work_span','level_schedule'))
+def test_fallback_graphs_use_semantic_labels_and_one_shape(name):
+    result=layout_graph(semantic_graph(name,['Создание независимых ветвей','Сведение результатов','Готовая задача']))
+    assert len({node.shape for node in result.nodes})==1
+    assert not any(node.label.isdigit() or (len(node.label)==1 and node.label.isalpha()) for node in result.nodes)
+    assert result.occupancy>=.55
+
+
+def test_rendered_math_uses_typographic_subscripts():
+    assert _math_display('T_P ≥ W/P; T_level ≤ 2T*')=='Tₚ ≥ W/P; Tₗₑᵥₑₗ ≤ 2T*'
 
 
 def test_rectangle_diagonal_boundary_hits_real_box_edge():

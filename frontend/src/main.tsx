@@ -10,7 +10,7 @@ type Palette={background:string;surface:string;accent:string;accent_secondary:st
 type ImageCandidate={asset_id:string;path:string;score:number;semantic_fit:number;naturalness:number;composition:number;accepted:boolean;reason:string;selected:boolean};
 type VisualContract={goal:string;entities:string[];relations:string[];forbidden:string[]};
 type SlideChoice={id:string;title:string;archetype:string;lead:string;support_points:string[];takeaway:string;visual_strategy?:string;visual_score?:number;visual_reason?:string;visual_contract?:VisualContract;image_candidates?:ImageCandidate[];selected:Variant;options:Record<Variant,Option>};
-type Result={presentation?:Export;variants?:Record<string,Export>;slides?:SlideChoice[];selection?:Record<string,string>;palette?:Palette;source_palette?:Palette;elapsed_seconds?:number;deadline_met?:boolean};
+type Result={request?:{template_id:string;content_id:string};presentation?:Export;variants?:Record<string,Export>;slides?:SlideChoice[];selection?:Record<string,string>;palette?:Palette;source_palette?:Palette;elapsed_seconds?:number;deadline_met?:boolean};
 type Job={id:string;state:string;stage:string;error:string;result:Result};
 type Template={id:string;name:string;design:{prototypes:unknown[];fonts:string[];warnings:string[]}};
 type Content={id:string;name:string;content:{claims:unknown[];datasets:unknown[]}};
@@ -61,6 +61,8 @@ function App(){
     if(!job)return;localStorage.setItem('vktech-job',job.id);
     if(job.state==='ready'&&job.result.selection){
       setDraftSelection(job.result.selection as Record<string,Variant>);
+      if(job.result.request?.template_id)setTemplate(job.result.request.template_id);
+      if(job.result.request?.content_id)setContent(job.result.request.content_id);
       const next=normalizePalette(job.result.palette||job.result.source_palette);setPalette(next);setAppliedPalette(next);setSourcePalette(normalizePalette(job.result.source_palette||next));
       setSlide(current=>Math.min(current,(job.result.slides?.length||1)-1));
       const url=new URL(window.location.href);url.searchParams.set('job',job.id);window.history.replaceState({},'',url);

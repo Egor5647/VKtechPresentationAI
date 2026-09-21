@@ -6,6 +6,7 @@ import io
 import json
 import os
 import posixpath
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -23,6 +24,18 @@ from .graph_layout import semantic_graph,layout_graph
 from .opc import Package, NS, serialize, relpath
 from .smartart import inject
 from .settings import artifact_path
+
+
+_SUBSCRIPT=str.maketrans({'0':'₀','1':'₁','2':'₂','3':'₃','4':'₄','5':'₅','6':'₆','7':'₇','8':'₈','9':'₉','a':'ₐ','e':'ₑ','h':'ₕ','i':'ᵢ','j':'ⱼ','k':'ₖ','l':'ₗ','m':'ₘ','n':'ₙ','o':'ₒ','p':'ₚ','r':'ᵣ','s':'ₛ','t':'ₜ','u':'ᵤ','v':'ᵥ','x':'ₓ'})
+
+
+def _math_display(value: str) -> str:
+    """Use readable Unicode subscripts in rendered formulas, keeping IR stable."""
+    def replace(match):
+        suffix=match.group(1)
+        converted=suffix.casefold().translate(_SUBSCRIPT)
+        return converted if len(converted)==len(suffix) else '_'+suffix
+    return re.sub(r'_([A-Za-z0-9]+)',replace,value)
 
 
 def _card_font_size(node,w,h,text,minimum=12):
@@ -49,6 +62,7 @@ def _card_font_size(node,w,h,text,minimum=12):
 
 
 def _card(out,node,x,y,w,h,text,name,fill,foreground,bold=False):
+    text=_math_display(text)
     sh=out.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,x,y,w,h)
     sh.name=name;sh.fill.solid();sh.fill.fore_color.rgb=RGBColor.from_string(fill)
     sh.line.color.rgb=RGBColor.from_string(node.data.get('accent','0077FF'));sh.line.width=Pt(1.4)
@@ -107,8 +121,8 @@ def _render_semantic_graph(out,node,xywh,layout_name,items,accent,surface,dark,w
     if result.crossings>spec.rules.max_crossings:raise ValueError(f'Graph layout has {result.crossings} edge crossings')
     x,y,w,h=xywh
     caption_band=round(w*.19) if result.layer_captions and result.direction in {'TB','BT'} else 0
-    footer_h=round(h*.14) if result.footer else 0
-    legend_h=round(h*.22) if result.kind=='work_span' else round(h*.10) if result.educational_example else 0
+    footer_h=round(h*.11) if result.footer else 0
+    legend_h=round(h*.16) if result.kind=='work_span' else round(h*.08) if result.educational_example else 0
     gx=x+caption_band;gy=y+legend_h;gw=w-caption_band;gh=h-footer_h-legend_h
     lookup={placed.id:placed for placed in result.nodes}
     bounds={}
@@ -151,7 +165,7 @@ def _render_semantic_graph(out,node,xywh,layout_name,items,accent,surface,dark,w
     for index,placed in enumerate(result.nodes):
         nx,ny,nw,nh=bounds[placed.id]
         fill=accent if placed.emphasis else surface;foreground=white if placed.emphasis else dark
-        display=placed.label if placed.weight is None else f'{placed.label}\n{placed.weight:g}'
+        display=_math_display(placed.label if placed.weight is None else f'{placed.label}\n{placed.weight:g}')
         if placed.shape=='rounded':
             _card(out,node,nx,ny,nw,nh,display,f'{node.id}-graph-node-{placed.id}',fill,foreground,placed.emphasis)
         else:
@@ -175,8 +189,9 @@ def _render_semantic_graph(out,node,xywh,layout_name,items,accent,surface,dark,w
     if result.footer:
         shape=out.shapes.add_textbox(x,y+h-footer_h,w,footer_h);shape.name=f'{node.id}-graph-footer'
         tf=shape.text_frame;tf.clear();tf.word_wrap=True;tf.vertical_anchor=MSO_ANCHOR.MIDDLE;tf.margin_left=tf.margin_right=Pt(2)
-        p=tf.paragraphs[0];p.text=result.footer;p.alignment=PP_ALIGN.CENTER;p.font.name=node.style.font
-        p.font.size=Pt(min(14,_card_font_size(node,w,footer_h,result.footer,10)));p.font.bold=True;p.font.color.rgb=RGBColor.from_string(accent)
+        footer=_math_display(result.footer)
+        p=tf.paragraphs[0];p.text=footer;p.alignment=PP_ALIGN.CENTER;p.font.name=node.style.font
+        p.font.size=Pt(min(14,_card_font_size(node,w,footer_h,footer,10)));p.font.bold=True;p.font.color.rgb=RGBColor.from_string(accent)
     if result.kind=='work_span':
         metrics=dict(result.metrics);labels=(f'Work W = {metrics.get("work",0):g}',f'Span S = {metrics.get("span",0):g}')
         for index,label in enumerate(labels):
@@ -410,7 +425,7 @@ def temporary_objects(scene,slide):
                 sh.fill.solid();sh.fill.fore_color.rgb=RGBColor.from_string(node.style.fill)
                 tf.margin_left=tf.margin_right=Pt(10);tf.margin_top=tf.margin_bottom=Pt(8)
             else:tf.margin_left=tf.margin_right=tf.margin_top=tf.margin_bottom=0
-            for i,line in enumerate(node.text.split('\n')):
+            for i,line in enumerate(_math_display(node.text).split('\n')):
                 p=tf.paragraphs[0] if i==0 else tf.add_paragraph()
                 p.text=line;p.font.name=node.style.font;p.font.size=Pt(node.style.size);p.font.bold=node.style.bold;p.font.color.rgb=RGBColor.from_string(node.style.color)
                 p.alignment={'center':PP_ALIGN.CENTER,'right':PP_ALIGN.RIGHT}.get(node.style.align,PP_ALIGN.LEFT)
@@ -569,7 +584,7 @@ def graph_svg(node):
     if spec is None:return ''
     result=layout_graph(spec);accent=node.data.get('accent','0077FF');surface=node.data.get('surface') or node.style.fill or 'E8EEF6'
     dark='202020' if contrast('202020',surface)>=4.5 else 'FFFFFF';on_accent='FFFFFF' if contrast('FFFFFF',accent)>=3 else '202020'
-    caption=105 if result.layer_captions else 15;top=45 if result.kind=='work_span' else 30 if result.educational_example else 15;footer=34 if result.footer else 10
+    caption=92 if result.layer_captions else 10;top=36 if result.kind=='work_span' else 24 if result.educational_example else 10;footer=28 if result.footer else 8
     gx,gy,gw,gh=caption,top,600-caption-15,300-top-footer
     bounds={}
     for placed in result.nodes:
@@ -601,7 +616,7 @@ def graph_svg(node):
         x,y,w,h=bounds[placed.id];fill=accent if placed.emphasis else surface;color=on_accent if placed.emphasis else dark
         if placed.shape=='circle':parts.append(f'<circle cx="{x+w/2:.1f}" cy="{y+h/2:.1f}" r="{w/2:.1f}" fill="#{fill}" stroke="#{accent}" stroke-width="1.5"/>')
         else:parts.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="{h:.1f}" rx="10" fill="#{fill}" stroke="#{accent}" stroke-width="1.5"/>')
-        lines=[placed.label]+([f'{placed.weight:g}'] if placed.weight is not None else []);base=y+h/2-(len(lines)-1)*7
+        lines=[_math_display(placed.label)]+([f'{placed.weight:g}'] if placed.weight is not None else []);base=y+h/2-(len(lines)-1)*7
         for index,value in enumerate(lines):parts.append(f'<text x="{x+w/2:.1f}" y="{base+index*15:.1f}" font-size="13" font-weight="700" text-anchor="middle" dominant-baseline="middle" fill="#{color}">{html.escape(value)}</text>')
     if result.layer_captions:
         centers=_spread_positions(len(result.layer_captions),spec.rules.margin_y+spec.rules.node_height/2,1-spec.rules.margin_y-spec.rules.node_height/2)
@@ -610,7 +625,7 @@ def graph_svg(node):
     if result.kind=='work_span':
         metrics=dict(result.metrics);parts.append(f'<text x="15" y="20" font-size="13" font-weight="700" fill="#{dark}">Work W = {metrics.get("work",0):g}</text><text x="210" y="20" font-size="13" font-weight="700" fill="#{accent}">Span S = {metrics.get("span",0):g}</text>')
     if result.educational_example:parts.append(f'<text x="585" y="20" font-size="11" text-anchor="end" fill="#{accent}">{html.escape(result.example_label or "Учебный пример")}</text>')
-    if result.footer:parts.append(f'<text x="300" y="292" font-size="13" font-weight="700" text-anchor="middle" fill="#{accent}">{html.escape(result.footer)}</text>')
+    if result.footer:parts.append(f'<text x="300" y="292" font-size="13" font-weight="700" text-anchor="middle" fill="#{accent}">{html.escape(_math_display(result.footer))}</text>')
     parts.append('</svg>');return ''.join(parts)
 
 
@@ -624,7 +639,7 @@ def export_html(scene,path,backgrounds=None):
         for n in slide.nodes:
             b=n.box;fs=n.style.size/72/(scene.width/914400)*100
             style=f'left:{b.x*100}%;top:{b.y*100}%;width:{b.w*100}%;height:{b.h*100}%;font-family:{html.escape(json.dumps(n.style.font),quote=True)},sans-serif;font-size:{fs}cqw;color:#{n.style.color};text-align:{n.style.align};font-weight:{700 if n.style.bold else 400};background:{"#"+n.style.fill if n.style.fill else "transparent"};padding:{"0.45em" if n.style.fill else "0"}'
-            if n.kind=='text':body=html.escape(n.text).replace('\n','<br>')
+            if n.kind=='text':body=html.escape(_math_display(n.text)).replace('\n','<br>')
             elif n.kind=='chart':body=chart_svg(n,scene.variant)
             elif n.kind=='table':
                 data=n.data;headers=[data['title']]+[name+' ('+data['unit']+')' for name in data['series']]
