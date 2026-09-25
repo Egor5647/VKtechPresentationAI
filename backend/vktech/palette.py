@@ -100,7 +100,7 @@ def recolor_generated_assets(content: ContentIR,design: DesignIR,palette: Palett
     from PIL import Image
     result=content.model_copy(deep=True);replacements={}
     for asset in result.assets:
-        if not asset.source.startswith('Z-Image'):continue
+        if not (asset.source.startswith('Z-Image') or asset.source.startswith('AI-generated')):continue
         source=artifact_path(asset.path)
         if not source.exists():continue
         with Image.open(source) as opened:

@@ -211,7 +211,10 @@ class Pipeline:
         with local_image_phase():self.gateway.image(illustration_prompt(slide)+suffix,output)
         from PIL import Image
         with Image.open(output) as generated:media={'PNG':'image/png','JPEG':'image/jpeg','WEBP':'image/webp'}[generated.format]
-        asset=Asset(id=slide.id+'-generated-'+job_id[:8],path=str(output.relative_to(artifact_path('.'))),description=slide.visual_brief or slide.message,source='Z-Image-Turbo 8-bit MLX generated; illustrative, not factual evidence',media_type=media,claim_ids=slide.claim_ids)
+        provider=getattr(self.gateway,'provider','configured-provider');manifest=getattr(self.gateway,'manifest',{})
+        image_model=manifest.get('image',{}).get('api_model','configured-image-model')
+        source=f'AI-generated via {provider}/{image_model}; illustrative, not factual evidence'
+        asset=Asset(id=slide.id+'-generated-'+job_id[:8],path=str(output.relative_to(artifact_path('.'))),description=slide.visual_brief or slide.message,source=source,media_type=media,claim_ids=slide.claim_ids)
         content.assets.append(asset);return asset
 
     def _generate_image_candidates(self,slide,content,folder,job_id,instruction=''):
@@ -227,7 +230,10 @@ class Pipeline:
         from PIL import Image
         for index,output in enumerate(paths):
             with Image.open(output) as generated:media={'PNG':'image/png','JPEG':'image/jpeg','WEBP':'image/webp'}[generated.format]
-            asset=Asset(id=f'{slide.id}-candidate-{index+1}-{job_id[:8]}',path=str(output.relative_to(artifact_path('.'))),description=slide.visual_contract.goal or slide.message,source='Z-Image-Turbo 8-bit MLX generated; illustrative, not factual evidence',media_type=media,claim_ids=slide.claim_ids)
+            provider=getattr(self.gateway,'provider','configured-provider');manifest=getattr(self.gateway,'manifest',{})
+            image_model=manifest.get('image',{}).get('api_model','configured-image-model')
+            source=f'AI-generated via {provider}/{image_model}; illustrative, not factual evidence'
+            asset=Asset(id=f'{slide.id}-candidate-{index+1}-{job_id[:8]}',path=str(output.relative_to(artifact_path('.'))),description=slide.visual_contract.goal or slide.message,source=source,media_type=media,claim_ids=slide.claim_ids)
             content.assets.append(asset);assets.append(asset)
         payload={'slide_id':slide.id,'title':slide.title,'message':slide.message,'visual_contract':slide.visual_contract.model_dump(),'candidate_indices':list(range(count))}
         selection=self.gateway.structured('image_selection',payload,ImageSelection,images=paths)

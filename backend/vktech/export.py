@@ -465,7 +465,7 @@ def temporary_objects(scene,slide):
             picture=str(source)
             with Image.open(source) as opened:
                 im=opened.convert('RGB')
-                if str(node.data.get('source','')).startswith('Z-Image'):
+                if str(node.data.get('source','')).startswith(('Z-Image','AI-generated')):
                     background=Image.new('RGB',im.size,im.getpixel((0,0)))
                     diff=ImageChops.difference(im,background).convert('L').point(lambda value:255 if value>18 else 0)
                     bbox=diff.getbbox()

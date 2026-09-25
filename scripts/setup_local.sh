@@ -21,7 +21,6 @@ if [ ! -x "$ROOT/.venv/bin/python" ]; then
   "$PYTHON" -m venv "$ROOT/.venv"
 fi
 "$ROOT/.venv/bin/python" -m pip install -e "$ROOT[test]"
-"$ROOT/scripts/ensure_mlx_env.sh"
 
 if command -v pnpm >/dev/null 2>&1; then
   (cd "$ROOT/frontend" && pnpm install --frozen-lockfile && pnpm run build)
@@ -35,5 +34,4 @@ fi
 if [ ! -f "$ROOT/.env" ]; then
   cp "$ROOT/.env.example" "$ROOT/.env"
 fi
-echo "Application dependencies are ready. Download the three models before make run."
-
+echo "Application dependencies are ready. Add POLZA_API_KEY to .env, then run: make run"

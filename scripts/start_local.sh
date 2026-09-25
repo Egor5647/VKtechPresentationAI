@@ -11,32 +11,22 @@ if [ -f "$ROOT/.env" ]; then
   set +a
 fi
 [ -n "$REQUESTED_MODEL_MODE" ] && MODEL_MODE=$REQUESTED_MODEL_MODE
-
-export AI_PROVIDER=${AI_PROVIDER:-polza}
-if [ "$AI_PROVIDER" != "polza" ]; then
-  echo "For local compatibility mode run: make run-local" >&2
-  exit 2
-fi
-if [ -z "${POLZA_API_KEY:-}" ]; then
-  echo "POLZA_API_KEY is empty. Add it to .env before starting the service." >&2
-  exit 2
-fi
+export AI_PROVIDER=local
 
 export DATA_DIR=${DATA_DIR:-"$ROOT/data"}
 export DATABASE_URL=${DATABASE_URL:-"sqlite:///$ROOT/data/service.sqlite"}
 export MODEL_PROFILE=${MODEL_PROFILE:-selection}
 export MODEL_MODE=${MODEL_MODE:-quality}
+export MODEL_BASE_URL=${MODEL_BASE_URL:-http://127.0.0.1:8001/v1}
+export T2I_BASE_URL=${T2I_BASE_URL:-http://127.0.0.1:8002/v1}
 export MODEL_MAX_TOKENS_PLANNING=${MODEL_MAX_TOKENS_PLANNING:-6500}
-SOFFICE=${SOFFICE:-soffice}
-PDFTOPPM=${PDFTOPPM:-pdftoppm}
-case "$SOFFICE" in */*) ;; *) SOFFICE=$(command -v "$SOFFICE" || true) ;; esac
-case "$PDFTOPPM" in */*) ;; *) PDFTOPPM=$(command -v "$PDFTOPPM" || true) ;; esac
-export SOFFICE PDFTOPPM
+export SOFFICE=${SOFFICE:-$(command -v soffice || true)}
+export PDFTOPPM=${PDFTOPPM:-$(command -v pdftoppm || true)}
 
 if [ -z "$SOFFICE" ] && [ -x /Applications/LibreOffice.app/Contents/MacOS/soffice ]; then
   export SOFFICE=/Applications/LibreOffice.app/Contents/MacOS/soffice
 fi
-for required in "$ROOT/.venv/bin/python" "$SOFFICE" "$PDFTOPPM"; do
+for required in "$ROOT/.venv/bin/python" "$ROOT/.mlx-venv/bin/python" "$SOFFICE" "$PDFTOPPM"; do
   if [ -z "$required" ] || [ ! -x "$required" ]; then
     echo "Dependencies are incomplete. Run: make setup" >&2
     exit 2
@@ -50,6 +40,13 @@ if [ ! -f "$ROOT/frontend/dist/index.html" ]; then
     (cd "$ROOT/frontend" && corepack pnpm run build)
   fi
 fi
+
+T2I_CLI=${T2I_CLI:-$(find "$ROOT/.tools/zimage" -type f -name ZImageCLI -print -quit 2>/dev/null || true)}
+if [ -z "$T2I_CLI" ] || [ ! -x "$T2I_CLI" ]; then
+  echo "Z-Image is not installed. Run: make download-zimage" >&2
+  exit 2
+fi
+export T2I_CLI
 
 LOG_DIR="$ROOT/.local/logs"
 mkdir -p "$LOG_DIR" "$DATA_DIR"
@@ -73,7 +70,7 @@ start_process() {
 wait_url() {
   url=$1
   name=$2
-  attempts=${3:-60}
+  attempts=${3:-180}
   while [ "$attempts" -gt 0 ]; do
     if curl -fsS "$url" >/dev/null 2>&1; then return 0; fi
     attempts=$((attempts-1))
@@ -83,12 +80,16 @@ wait_url() {
   return 1
 }
 
+start_process text-model env MODEL_MODE="$MODEL_MODE" "$ROOT/scripts/start_mlx_model.sh"
+start_process image-model "$ROOT/scripts/start_zimage_server.sh"
+wait_url "$MODEL_BASE_URL/models" text-model 300
+wait_url "http://127.0.0.1:8002/health" image-model 60
+
 start_process api "$ROOT/.venv/bin/uvicorn" vktech.api:app --host 127.0.0.1 --port 8000
 start_process worker "$ROOT/.venv/bin/python" -m vktech.worker
 wait_url http://127.0.0.1:8000/api/health api 60
 
 echo "Service is ready: http://127.0.0.1:8000"
-echo "Inference: Polza.ai ($MODEL_MODE)"
 echo "Logs: $LOG_DIR"
 if command -v open >/dev/null 2>&1; then open http://127.0.0.1:8000; fi
 

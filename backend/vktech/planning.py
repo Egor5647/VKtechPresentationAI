@@ -305,7 +305,7 @@ def assign_visual_strategies(plan: PresentationPlan,content: ContentIR,allow_gen
     for index,slide in enumerate(result.slides):
         text=' '.join((slide.title,slide.message,slide.visual_brief)).lower()
         generated_asset=assets.get(slide.asset_id) if slide.asset_id else None
-        if generated_asset and not generated_asset.source.startswith('Z-Image'):generated_asset=None
+        if generated_asset and not (generated_asset.source.startswith('Z-Image') or generated_asset.source.startswith('AI-generated')):generated_asset=None
         if slide.dataset_id:
             slide.visual_strategy='table' if slide.visual=='table' else 'chart';slide.visual_score=1;slide.visual_reason='Числовые данные точнее передаются нативной диаграммой или таблицей.';continue
         if slide.asset_id and not generated_asset:

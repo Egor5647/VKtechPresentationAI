@@ -488,7 +488,7 @@ def test_job_lease_recovery_and_idempotency(tmp_path):
 
 
 def test_missing_inference_is_explicit(tmp_path,monkeypatch):
-    monkeypatch.setenv('DATA_DIR',str(tmp_path));monkeypatch.delenv('MODEL_BASE_URL',raising=False)
+    monkeypatch.setenv('DATA_DIR',str(tmp_path));monkeypatch.setenv('AI_PROVIDER','polza');monkeypatch.delenv('POLZA_API_KEY',raising=False)
     from vktech.model import ModelGateway,ModelUnavailable
     from vktech.contracts import PresentationPlan
     with pytest.raises(ModelUnavailable):ModelGateway().structured('planning',{},PresentationPlan)

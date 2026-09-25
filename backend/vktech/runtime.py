@@ -29,6 +29,8 @@ def _wait(url: str,ready: bool,timeout=180):
 @contextlib.contextmanager
 def local_image_phase():
     """Unload MLX-VLM while Z-Image runs, then restore it for vision audit."""
+    if os.environ.get('AI_PROVIDER','polza')!='local':
+        yield;return
     if os.environ.get('LOCAL_MODEL_SEQUENTIAL','0')!='1':
         yield;return
     base=os.environ.get('MODEL_BASE_URL','')

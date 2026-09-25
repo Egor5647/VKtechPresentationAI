@@ -1,4 +1,4 @@
-.PHONY: setup download-qwen download-ministral download-zimage run test
+.PHONY: setup check-api download-qwen download-ministral download-zimage run run-local test
 
 setup:
 	./scripts/setup_local.sh
@@ -15,6 +15,11 @@ download-zimage:
 run:
 	./scripts/start_all.sh
 
+check-api:
+	./scripts/check_polza.py
+
+run-local:
+	AI_PROVIDER=local ./scripts/start_local.sh
+
 test:
 	.venv/bin/python -m pytest -q
-

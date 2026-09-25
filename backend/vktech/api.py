@@ -52,10 +52,9 @@ async def uploaded(file):
 @app.get('/api/health')
 def health():
     import shutil
-    from .model import configured_text_model
-    manifest=config('models.yaml');mode=os.environ.get('MODEL_MODE',manifest['text']['default_mode']);selected=configured_text_model(manifest,mode)
-    final=os.environ.get('MODEL_PROFILE')=='final';name=os.environ.get('VK_MODEL_NAME' if final else 'MODEL_NAME') or selected['repository']
-    return {'status':'ok','profile':os.environ.get('MODEL_PROFILE','selection'),'model_mode':mode,'model_name':name,'model_configured':bool(os.environ.get('VK_BASE_URL' if final else 'MODEL_BASE_URL')),'image_model_configured':bool(os.environ.get('T2I_BASE_URL')),'renderer_available':bool(shutil.which(os.environ.get('SOFFICE','soffice'))),'database':store().engine.dialect.name}
+    from .model import inference_status
+    inference=inference_status()
+    return {'status':'ok','profile':os.environ.get('MODEL_PROFILE','selection'),'provider':inference['provider'],'model_mode':inference['mode'],'model_name':inference['model'],'model_configured':inference['model_configured'],'image_model_name':inference['image_model'],'image_model_configured':inference['image_model_configured'],'renderer_available':bool(shutil.which(os.environ.get('SOFFICE','soffice'))),'database':store().engine.dialect.name}
 
 
 @app.post('/api/templates')
@@ -101,8 +100,9 @@ def contents():return [{'id':r.id,'name':r.name,'content':json.loads(r.document)
 @app.post('/api/jobs',status_code=202)
 def generate(request:GenerateRequest):
     store().record(request.template_id,'template');store().record(request.content_id,'content')
-    if request.generate_images and not os.environ.get('T2I_BASE_URL'):
-        raise ValueError('Генерация новых иллюстраций недоступна: T2I endpoint не настроен. Снимите этот флажок.')
+    from .model import inference_status
+    if request.generate_images and not inference_status()['image_model_configured']:
+        raise ValueError('Генерация новых иллюстраций недоступна: API для изображений не настроен. Снимите этот флажок.')
     return {'id':store().enqueue('generate',request.model_dump())}
 
 
@@ -180,8 +180,9 @@ def update_visual(jid:str,request:VisualUpdateRequest):
     result=json.loads(parent.result)
     if request.slide_id not in result.get('selection',{}):raise ValueError('Unknown slide ID')
     if request.selection is not None and set(request.selection)!=set(result['selection']):raise ValueError('Selection must contain every slide exactly once')
-    if request.mode=='image' and not request.candidate_asset_id and not os.environ.get('T2I_BASE_URL'):
-        raise ValueError('Генерация новых иллюстраций недоступна: T2I endpoint не настроен')
+    from .model import inference_status
+    if request.mode=='image' and not request.candidate_asset_id and not inference_status()['image_model_configured']:
+        raise ValueError('Генерация новых иллюстраций недоступна: API для изображений не настроен')
     return {'id':store().enqueue('regenerate_visual',{'parent_job_id':jid,'request':request.model_dump()})}
 
 
