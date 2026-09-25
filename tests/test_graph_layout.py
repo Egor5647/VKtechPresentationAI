@@ -5,18 +5,21 @@ from pydantic import ValidationError
 
 from vktech.contracts import DiagramSpec
 from vktech.export import _graph_boundary_point, _graph_node_bounds, _math_display
-from vktech.graph_layout import PlacedNode, graph_quality, layout_graph, semantic_graph
+from vktech.graph_layout import PlacedNode, default_diagram, graph_quality, layout_graph, semantic_graph
 
 
 GRAPH_TYPES=(
     'fork_join','reduction_tree','work_span','level_schedule',
-    'level_bound_proof','critical_path',
+    'level_bound_proof','critical_path','sequence','comparison','hierarchy',
+    'layers','memory_access','scheduler','formula_focus','abstraction','pram_reality',
 )
 
 
 @pytest.mark.parametrize('name',GRAPH_TYPES)
 def test_semantic_graph_rules_produce_clean_layout(name):
-    result,failures=graph_quality(name,['Work','Span','T ≤ 2T*'])
+    generic={'sequence','comparison','hierarchy','layers','memory_access','scheduler','formula_focus','abstraction','pram_reality'}
+    description=default_diagram(name,['Work','Span','T ≤ 2T*']) if name in generic else None
+    result,failures=graph_quality(name,['Work','Span','T ≤ 2T*'],description)
     assert not failures
     assert result.crossings==0
     for node in result.nodes:
@@ -106,3 +109,10 @@ def test_unreadable_graph_labels_disqualify_candidate():
     ],edges=[{'source':'a','target':'b'}])
     _,failures=graph_quality('fork_join',[],diagram)
     assert 'unreadable_labels' in failures
+
+
+def test_short_formula_label_is_never_cut_inside_parentheses():
+    diagram=default_diagram('comparison',['CREW: X → все','EREW: дерево копий','O(1) против Θ(log n)'])
+    result,failures=graph_quality('comparison',[],diagram)
+    assert 'incomplete_labels' not in failures
+    assert result.nodes[-1].label=='O(1) против Θ(log n)'

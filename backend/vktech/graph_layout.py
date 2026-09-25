@@ -238,6 +238,15 @@ def _rules(kind: str):
         'critical_path':GraphRules(direction='LR',margin_x=.03,margin_y=.04,node_width=.22,node_height=.19),
         'level_schedule':GraphRules(margin_x=.03,margin_y=.04,node_width=.23,node_height=.17),
         'level_bound_proof':GraphRules(direction='LR',node_width=.29,node_height=.22,margin_x=.02,margin_y=.04,min_occupancy=.15),
+        'sequence':GraphRules(direction='LR',node_width=.25,node_height=.24,margin_x=.02,margin_y=.06,min_occupancy=.18),
+        'layers':GraphRules(direction='LR',node_width=.25,node_height=.24,margin_x=.02,margin_y=.06,min_occupancy=.18),
+        'abstraction':GraphRules(direction='LR',node_width=.25,node_height=.24,margin_x=.02,margin_y=.06,min_occupancy=.18),
+        'pram_reality':GraphRules(direction='LR',node_width=.25,node_height=.24,margin_x=.02,margin_y=.06,min_occupancy=.18),
+        'comparison':GraphRules(node_width=.25,node_height=.28,margin_x=.02,margin_y=.06,min_occupancy=.18),
+        'memory_access':GraphRules(node_width=.25,node_height=.28,margin_x=.02,margin_y=.06,min_occupancy=.18),
+        'scheduler':GraphRules(node_width=.25,node_height=.28,margin_x=.02,margin_y=.06,min_occupancy=.18),
+        'formula_focus':GraphRules(node_width=.25,node_height=.28,margin_x=.02,margin_y=.06,min_occupancy=.18),
+        'hierarchy':GraphRules(node_width=.25,node_height=.22,margin_x=.02,margin_y=.04,min_occupancy=.25),
     }[kind]
 
 
@@ -264,7 +273,7 @@ def _from_description(description: DiagramSpec) -> GraphSpec:
     return spec
 
 
-def _short_concept(value: str,max_words=3) -> str:
+def _short_concept(value: str,max_words=4) -> str:
     """Turn a source-backed visual item into a compact vertex label."""
     value=re.sub(r'^\s*(?:этап\s*\d+|fork|join|результат|ready[- ]?вершина)\s*:\s*','',value,flags=re.I)
     value=re.sub(r'\([^)]{18,}\)','',value).strip(' .:;—–-')
@@ -277,9 +286,12 @@ def _short_concept(value: str,max_words=3) -> str:
     )
     for pattern,label in replacements:
         if re.search(pattern,value,re.I):return label
-    words=value.split()
-    result=' '.join(words[:max_words])
-    return result[:28].rstrip(' ,:;') or 'Задача'
+    words=value.split();chosen=words[:max_words]
+    while len(' '.join(chosen))>24 and len(chosen)>1:chosen.pop()
+    result=' '.join(chosen)
+    # A single identifier can legitimately reach the box limit. Never cut a
+    # multiword fact or formula in the middle of a token.
+    return (result if len(result)<=24 else result[:24]).rstrip(' ,:;') or 'Задача'
 
 
 def _semantic_tasks(items: list[str],fallback: tuple[str,...],count: int) -> list[str]:
@@ -309,6 +321,15 @@ def default_diagram(layout: str,items: list[str]) -> DiagramSpec | None:
         return DiagramSpec(kind=layout,nodes=[{'id':node_id,'label':label,'layer':layer,'origin':'derived'} for node_id,label,layer in zip(('a','b','c','d','e','f','g'),labels,(0,0,1,1,1,2,2))],edges=[{'source':'a','target':'c'},{'source':'a','target':'d'},{'source':'b','target':'d'},{'source':'b','target':'e'},{'source':'c','target':'f'},{'source':'d','target':'f'},{'source':'d','target':'g'},{'source':'e','target':'g'}],footer=items[0] if items else 'Следующий уровень начинается после завершения предыдущего')
     if layout=='level_bound_proof':
         return DiagramSpec(kind=layout,nodes=[{'id':'actual','label':'T_level','layer':0,'role':'bound'},{'id':'decomposition','label':'W/P + S','layer':1,'role':'bound'},{'id':'optimum','label':'2T*','layer':2,'role':'bound'}],edges=[{'source':'actual','target':'decomposition','label':'≤'},{'source':'decomposition','target':'optimum','label':'≤'}],footer='Количество уровней не превышает длину критического пути')
+    if layout in {'sequence','layers','abstraction','pram_reality'}:
+        labels=_semantic_tasks(items,('Исходное состояние','Преобразование','Результат'),3)
+        return DiagramSpec(kind=layout,nodes=[{'id':f'n{i}','label':label,'layer':i,'origin':'derived'} for i,label in enumerate(labels)],edges=[{'source':f'n{i}','target':f'n{i+1}'} for i in range(len(labels)-1)])
+    if layout in {'comparison','memory_access','scheduler','formula_focus'}:
+        labels=_semantic_tasks(items,('Вариант A','Вариант B','Вариант C'),3)
+        return DiagramSpec(kind=layout,nodes=[{'id':f'n{i}','label':label,'layer':0,'origin':'derived'} for i,label in enumerate(labels)])
+    if layout=='hierarchy':
+        labels=_semantic_tasks(items,('Главная идея','Составляющая A','Составляющая B'),3)
+        return DiagramSpec(kind=layout,nodes=[{'id':'root','label':labels[0],'layer':0,'origin':'derived'},*({'id':f'n{i}','label':label,'layer':1,'origin':'derived'} for i,label in enumerate(labels[1:],1))],edges=[{'source':'root','target':f'n{i}'} for i in range(1,len(labels))])
     return None
 
 
@@ -317,6 +338,8 @@ def semantic_graph(layout: str,items: list[str],description: DiagramSpec | dict 
     if description is not None:
         if not isinstance(description,DiagramSpec):description=DiagramSpec.model_validate(description)
         return _from_description(description)
+    if layout in {'sequence','comparison','hierarchy','layers','memory_access','scheduler','formula_focus','abstraction','pram_reality'}:
+        return None
     fallback=default_diagram(layout,items)
     return _from_description(fallback) if fallback else None
 
@@ -331,6 +354,8 @@ def graph_quality(layout: str,items: list[str],description: DiagramSpec | dict |
     if result.occupancy<spec.rules.min_occupancy:failures.append('low_occupancy')
     if any(not node.label.strip() or len(node.label)>({'circle':8,'rounded':24}[node.shape]) for node in result.nodes):
         failures.append('unreadable_labels')
+    if any(node.label.count('(')!=node.label.count(')') or node.label.count('[')!=node.label.count(']') for node in result.nodes):
+        failures.append('incomplete_labels')
     if result.kind in {'work_span','critical_path'}:
         if any(node.weight is None for node in result.nodes):failures.append('missing_weights')
         if not result.metrics:failures.append('missing_metrics')

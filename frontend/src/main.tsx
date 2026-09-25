@@ -9,8 +9,10 @@ type Format='pptx'|'pdf'|'html';
 type Palette={background:string;surface:string;accent:string;accent_secondary:string;text_primary:string;text_on_accent:string};
 type ImageCandidate={asset_id:string;path:string;score:number;semantic_fit:number;naturalness:number;composition:number;accepted:boolean;reason:string;selected:boolean};
 type VisualContract={goal:string;entities:string[];relations:string[];forbidden:string[]};
-type SlideChoice={id:string;title:string;archetype:string;lead:string;support_points:string[];takeaway:string;visual_strategy?:string;visual_score?:number;visual_reason?:string;visual_contract?:VisualContract;image_candidates?:ImageCandidate[];selected:Variant;options:Record<Variant,Option>};
-type Result={request?:{template_id:string;content_id:string};presentation?:Export;variants?:Record<string,Export>;slides?:SlideChoice[];selection?:Record<string,string>;palette?:Palette;source_palette?:Palette;elapsed_seconds?:number;deadline_met?:boolean};
+type SlideLogicContract={teaching_goal:string;question_answered:string;main_assertion:string;semantic_payload_hash:string};
+type LogicFinding={rule:string;severity:'error'|'warning'|'info';message:string;repair_level:string};
+type SlideChoice={id:string;title:string;archetype:string;lead:string;support_points:string[];takeaway:string;visual_strategy?:string;visual_score?:number;visual_reason?:string;visual_contract?:VisualContract;logic_contract?:SlideLogicContract;logic_status?:'ok'|'review';logic_findings?:LogicFinding[];image_candidates?:ImageCandidate[];selected:Variant;options:Record<Variant,Option>};
+type Result={request?:{template_id:string;content_id:string};presentation?:Export;variants?:Record<string,Export>;slides?:SlideChoice[];selection?:Record<string,string>;logic_findings?:LogicFinding[];palette?:Palette;source_palette?:Palette;elapsed_seconds?:number;deadline_met?:boolean};
 type Job={id:string;state:string;stage:string;error:string;result:Result};
 type Template={id:string;name:string;design:{prototypes:unknown[];fonts:string[];warnings:string[]}};
 type Content={id:string;name:string;content:{claims:unknown[];datasets:unknown[]}};
@@ -84,6 +86,10 @@ function App(){
     if(!job)return;setBusy(true);setError('');
     try{const created=await api<{id:string}>(`/api/jobs/${job.id}/${path}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});setJob(await api<Job>('/api/jobs/'+created.id))}catch(e){setError((e as Error).message);setBusy(false)}
   }
+  async function recompose(){
+    if(!job)return;setBusy(true);setError('');
+    try{const created=await api<{id:string}>(`/api/jobs/${job.id}/recompose`,{method:'POST'});setJob(await api<Job>('/api/jobs/'+created.id))}catch(e){setError((e as Error).message);setBusy(false)}
+  }
   async function download(format:Format){
     if(!job||!presentation)return;setError('');
     const selection=Object.fromEntries(choices.map(choice=>[choice.id,draftSelection[choice.id]||choice.selected])) as Record<string,Variant>;
@@ -140,11 +146,12 @@ function App(){
               <div className="viewer">
                 <div className="slide-preview"><img style={{filter:previewFilter}} src={fileURL(job.id,currentChoice.options[selectedFor(currentChoice)].preview)} alt={currentChoice.title}/></div>
                 <div className="pagination"><button disabled={slide===0} onClick={()=>setSlide(slide-1)}>←</button><span>{slide+1} / {choices.length} · {currentChoice.title}</span><button disabled={slide+1===choices.length} onClick={()=>setSlide(slide+1)}>→</button></div>
-                <div className="deck-thumbs">{choices.map((choice,index)=>{const selected=selectedFor(choice);const preview=choice.options[selected].preview;return <button key={choice.id} className={slide===index?'active':''} onClick={()=>setSlide(index)}><img style={{filter:previewFilter}} src={fileURL(job.id,preview)} alt={`Слайд ${index+1}`}/><span>{index+1}</span><i>{selected}</i></button>})}</div>
+                <div className="deck-thumbs">{choices.map((choice,index)=>{const selected=selectedFor(choice);const preview=choice.options[selected].preview;return <button key={choice.id} className={slide===index?'active':''} onClick={()=>setSlide(index)}><img style={{filter:previewFilter}} src={fileURL(job.id,preview)} alt={`Слайд ${index+1}`}/><span>{index+1}</span><i>{selected}</i>{choice.logic_status==='review'&&<em title="Требуется проверка логики">!</em>}</button>})}</div>
               </div>
               <aside className="slide-editor">
                 <div className="eyebrow">СЛАЙД {slide+1} · {archetypes[currentChoice.archetype]||currentChoice.archetype}</div><h2>{currentChoice.title}</h2><p className="lead">{currentChoice.lead}</p>
                 {currentChoice.support_points.length>0&&<ul>{currentChoice.support_points.map(point=><li key={point}>{point}</li>)}</ul>}{currentChoice.takeaway&&<p className="takeaway">{currentChoice.takeaway}</p>}
+                {currentChoice.logic_contract&&<section className={'logic-card '+(currentChoice.logic_status==='review'?'review-needed':'')}><div><b>{currentChoice.logic_status==='review'?'Требуется проверка':'Логика проверена'}</b></div><p>{currentChoice.logic_contract.teaching_goal}</p>{(currentChoice.logic_findings||[]).map(finding=><small key={finding.rule}>{finding.message}</small>)}<div className="logic-actions"><button disabled={busy} onClick={()=>beginChild('regenerate-slide',{slide_id:currentChoice.id,instruction:'Перепиши текст как один точный законченный тезис. Сохрани все факты, числа и связи с соседними слайдами.',selection:completeSelection()})}>Переписать текст</button><button disabled={busy} onClick={()=>beginChild('visual',{slide_id:currentChoice.id,mode:'auto',instruction:'Покажи главный тезис через обязательные сущности и связи без декоративных объектов.',selection:completeSelection()})}>Заменить визуал</button><button disabled={busy} onClick={recompose}>Перестроить раздел</button></div></section>}
                 <div className="choice-title"><b>Выберите компоновку</b></div>
                 <div className="slide-options">{(['A','B','C'] as const).map(id=>{const option=currentChoice.options[id];return <button key={id} className={selectedFor(currentChoice)===id?'active':''} disabled={busy||Boolean(exportTask)} onClick={()=>setDraftSelection(previous=>({...previous,[currentChoice.id]:id}))}><img src={fileURL(job.id,option.preview)} alt={variantNames[id]}/><span><b>{id} · {variantNames[id]}</b><small>оценка {Math.round(option.score)}/100</small></span></button>})}</div>
                 <div className="visual-editor">

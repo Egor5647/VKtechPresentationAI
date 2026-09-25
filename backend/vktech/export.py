@@ -166,10 +166,12 @@ def _render_semantic_graph(out,node,xywh,layout_name,items,accent,surface,dark,w
         nx,ny,nw,nh=bounds[placed.id]
         fill=accent if placed.emphasis else surface;foreground=white if placed.emphasis else dark
         display=_math_display(placed.label if placed.weight is None else f'{placed.label}\n{placed.weight:g}')
+        semantic_cards={'sequence','comparison','hierarchy','layers','memory_access','scheduler','formula_focus','abstraction','pram_reality'}
+        shape_name=(f'{node.id}-visual-card-{placed.id}' if result.kind in semantic_cards else f'{node.id}-graph-node-{placed.id}')
         if placed.shape=='rounded':
-            _card(out,node,nx,ny,nw,nh,display,f'{node.id}-graph-node-{placed.id}',fill,foreground,placed.emphasis)
+            _card(out,node,nx,ny,nw,nh,display,shape_name,fill,foreground,placed.emphasis)
         else:
-            shape=out.shapes.add_shape(MSO_SHAPE.OVAL,nx,ny,nw,nh);shape.name=f'{node.id}-graph-node-{placed.id}'
+            shape=out.shapes.add_shape(MSO_SHAPE.OVAL,nx,ny,nw,nh);shape.name=shape_name
             shape.fill.solid();shape.fill.fore_color.rgb=RGBColor.from_string(fill);shape.line.color.rgb=RGBColor.from_string(accent);shape.line.width=Pt(1.4)
             _plain_shape(shape)
             if display:

@@ -14,6 +14,7 @@ from .export import export_pptx,render,export_html
 from .audit import audit_scene,audit_rendered_deck,contextual_audit,project_contextual_issues,repair_scene
 from .selection import score_candidate,choose_variants,compose_scene
 from .palette import palette_from_design,recolor_design,recolor_generated_assets,recolor_scene,recolor_template,replace_scene_asset_paths
+from .logic import audit_deck_logic,enrich_logic_contracts,restructure_known_curriculum,validate_variant_semantics
 
 
 def write_json(path,doc):path.write_text(json.dumps(doc,ensure_ascii=False,indent=2),encoding='utf-8')
@@ -96,7 +97,7 @@ class Pipeline:
                 asset=self._generate_image(revised,content,folder,job.id,' Alternative composition with a distinct camera angle and silhouette.')
                 revised.asset_id=asset.id
             else:revised.asset_id=None
-            plan.slides[index]=revised;plan=enrich_plan(plan,content)
+            plan.slides[index]=revised;plan=enrich_logic_contracts(enrich_plan(enrich_logic_contracts(plan),content))
             write_json(folder/'plan.json',plan.model_dump());scenes=build_scenes(design,content,plan,job.id)
         elif visual_update:
             try:index=next(i for i,s in enumerate(plan.slides) if s.id==visual_update.slide_id)
@@ -118,7 +119,7 @@ class Pipeline:
                 if not original.generate_images:raise ValueError('Генерация изображений отключена для этой презентации')
                 slide.visual_strategy='generated_image';slide.visual_contract=visual_contract_for(slide)
                 image_candidates[slide.id]=self._generate_image_candidates(slide,content,folder,job.id,visual_update.instruction)
-            plan=enrich_plan(plan,content);write_json(folder/'plan.json',plan.model_dump())
+            plan=enrich_logic_contracts(enrich_plan(enrich_logic_contracts(plan),content));write_json(folder/'plan.json',plan.model_dump())
             rebuilt=build_scenes(design,content,plan,job.id)
             # A visual edit must not reshuffle every other slide. Preserve the
             # parent's exact scenes and replace only the edited slide.
@@ -128,11 +129,13 @@ class Pipeline:
                 previous=previous.model_copy(deep=True);previous.id=candidate.id;previous.version+=1
                 previous.slides[index]=candidate.slides[index];scenes.append(previous)
         elif recompose:
-            validate_plan(plan,content,original.slide_count)
+            plan=restructure_known_curriculum(plan,content)
             plan=assign_visual_strategies(plan,content,original.generate_images)
-            plan=enrich_plan(plan,content);write_json(folder/'plan.json',plan.model_dump());scenes=build_scenes(design,content,plan,job.id)
+            plan=enrich_logic_contracts(enrich_plan(enrich_logic_contracts(plan),content));validate_plan(plan,content,original.slide_count)
+            write_json(folder/'plan.json',plan.model_dump());scenes=build_scenes(design,content,plan,job.id)
         else:
             before=time.monotonic();plan=plan_with_model(self.gateway,content,original);timings['planning']=time.monotonic()-before
+            plan=restructure_known_curriculum(plan,content)
             plan=assign_visual_strategies(plan,content,original.generate_images)
             if original.generate_images:
                 candidates=sorted((ps for ps in plan.slides if ps.visual_strategy=='generated_image'),key=lambda ps:(-ps.visual_score,ps.id))[:config('pipeline.yaml')['max_generated_image_slides']]
@@ -141,7 +144,10 @@ class Pipeline:
                     image_candidates[ps.id]=self._generate_image_candidates(ps,content,folder,job.id)
                     generated_count+=len(image_candidates[ps.id])
                 timings['image_generation']=round(time.monotonic()-image_started,3);timings['generated_image_count']=generated_count
-            plan=enrich_plan(plan,content);write_json(folder/'plan.json',plan.model_dump());scenes=build_scenes(design,content,plan,job.id)
+            plan=enrich_logic_contracts(enrich_plan(enrich_logic_contracts(plan),content))
+            write_json(folder/'plan.json',plan.model_dump());scenes=build_scenes(design,content,plan,job.id)
+        logic_findings=audit_deck_logic(plan) if plan else []
+        if plan:validate_variant_semantics(plan,scenes)
         write_json(folder/'content.json',content.model_dump());write_json(folder/'design.json',design.model_dump())
         stage('layout_export_render')
         # Each renderer has its own isolated LibreOffice profile and output directory.
@@ -186,7 +192,7 @@ class Pipeline:
         timings['selected_export_render']=round(selected_material[7],3)
         if job.kind=='repair':
             scores=parentresult.get('candidate_scores',{});reasons=parentresult.get('candidate_reasons',{})
-        slide_options=self._slide_options(plan,variants,selection,scores,reasons,image_candidates) if plan else parentresult.get('slides',[])
+        slide_options=self._slide_options(plan,variants,selection,scores,reasons,image_candidates,logic_findings) if plan else parentresult.get('slides',[])
         elapsed=round(time.monotonic()-started,3)
         current_palette=(parentresult.get('palette') if parentresult else None) or palette_from_design(design).model_dump()
         source_palette=(parentresult.get('source_palette') if parentresult else None) or current_palette
@@ -194,7 +200,7 @@ class Pipeline:
         source_variants=parentresult.get('artifacts',{}).get('source_variants') if parentresult else None
         artifacts={'plan':plan_path,'content':str((folder/'content.json').relative_to(artifact_path('.'))),'design':str((folder/'design.json').relative_to(artifact_path('.')))}
         artifacts['source_design']=source_design or artifacts['design'];artifacts['source_variants']=source_variants or {variant:value['scene'] for variant,value in variants.items()}
-        manifest={'request':original.model_dump(),'profile':self.gateway.profile,'model_manifest':self.gateway.manifest,'model_calls':self.gateway.calls,'workflow_hashes':workflow_manifest(),'timings':timings,'elapsed_seconds':elapsed,'deadline_met':elapsed<=config('pipeline.yaml')['deadline_seconds'],'font_verification':'see environment/unknown issues in audit','contextual_audit_strategy':'candidate B checked once; content findings projected because candidates share the same facts','palette':current_palette,'source_palette':source_palette,'variants':variants,'candidate_scores':scores,'candidate_reasons':reasons,'image_candidates':image_candidates,'selection':selection,'slides':slide_options,'presentation':presentation,'artifacts':artifacts}
+        manifest={'request':original.model_dump(),'profile':self.gateway.profile,'model_manifest':self.gateway.manifest,'model_calls':self.gateway.calls,'workflow_hashes':workflow_manifest(),'timings':timings,'elapsed_seconds':elapsed,'deadline_met':elapsed<=config('pipeline.yaml')['deadline_seconds'],'font_verification':'see environment/unknown issues in audit','contextual_audit_strategy':'candidate B checked once; content findings projected because candidates share the same facts','logic_findings':[finding.model_dump() for finding in logic_findings],'palette':current_palette,'source_palette':source_palette,'variants':variants,'candidate_scores':scores,'candidate_reasons':reasons,'image_candidates':image_candidates,'selection':selection,'slides':slide_options,'presentation':presentation,'artifacts':artifacts}
         write_json(folder/'manifest.json',manifest)
         manifest['manifest']=str((folder/'manifest.json').relative_to(artifact_path('.')))
         return manifest
@@ -249,11 +255,12 @@ class Pipeline:
         rel=lambda p:str(p.relative_to(artifact_path('.')))
         return {'version':scene.version,'scene':rel(sp),'audit':rel(ap),'pptx':rel(pptx),'pdf':rel(pdf),'html':rel(html),'previews':[rel(p) for p in previews],'issue_count':sum(i.status=='fail' for i in report.issues)}
 
-    def _slide_options(self,plan,variants,selection,scores,reasons,image_candidates=None):
+    def _slide_options(self,plan,variants,selection,scores,reasons,image_candidates=None,logic_findings=None):
         labels={'A':'Крупно и кратко','B':'Сбалансированно','C':'Подробно'};result=[]
         for index,slide in enumerate(plan.slides):
             options={v:{'label':labels[v],'preview':variants[v]['previews'][index],'score':scores.get(slide.id,{}).get(v,0),'reasons':reasons.get(slide.id,{}).get(v,{})} for v in ('A','B','C')}
-            result.append({'id':slide.id,'title':slide.title,'archetype':slide.archetype,'lead':slide.message,'balanced_message':slide.balanced_message,'support_points':slide.support_points,'takeaway':slide.takeaway,'visual_strategy':slide.visual_strategy,'visual_score':slide.visual_score,'visual_reason':slide.visual_reason,'visual_contract':slide.visual_contract.model_dump(),'image_candidates':(image_candidates or {}).get(slide.id,[]),'selected':selection.get(slide.id,'A'),'options':options})
+            findings=[finding.model_dump() for finding in (logic_findings or []) if finding.slide_id in {None,slide.id}]
+            result.append({'id':slide.id,'title':slide.title,'archetype':slide.archetype,'lead':slide.message,'balanced_message':slide.balanced_message,'support_points':slide.support_points,'takeaway':slide.takeaway,'visual_strategy':slide.visual_strategy,'visual_score':slide.visual_score,'visual_reason':slide.visual_reason,'visual_contract':slide.visual_contract.model_dump(),'logic_contract':slide.logic_contract.model_dump(),'logic_status':'review' if any(item['severity'] in {'error','warning'} for item in findings) else 'ok','logic_findings':findings,'image_candidates':(image_candidates or {}).get(slide.id,[]),'selected':selection.get(slide.id,'A'),'options':options})
         return result
 
     def _compose(self,job,payload,folder,started,stage):
@@ -301,6 +308,7 @@ class Pipeline:
         for candidates in image_candidates.values():
             for candidate in candidates:candidate['path']=replacements.get(candidate['path'],candidate['path'])
         plan=PresentationPlan.model_validate_json(artifact_path(parentresult['artifacts']['plan']).read_bytes())
+        logic_findings=audit_deck_logic(plan)
         # A recompose job may carry old source_variants only to preserve palette
         # provenance.  While the deck is still in its source palette, the
         # parent's current variants are the authoritative geometry.  Once a
@@ -346,9 +354,9 @@ class Pipeline:
         source_selected_report=AuditReport.model_validate_json(artifact_path(parentresult['presentation']['audit']).read_bytes())
         selected_material[6].issues.extend(project_contextual_issues([issue for issue in source_selected_report.issues if issue.category=='contextual'],source_selected,selected))
         presentation=self._entry(*selected_material[:7]);timings['selected_export_render']=round(selected_material[7],3)
-        slides=self._slide_options(plan,variants,selection,scores,reasons,image_candidates)
+        slides=self._slide_options(plan,variants,selection,scores,reasons,image_candidates,logic_findings)
         elapsed=round(time.monotonic()-started,3)
         artifacts={'plan':parentresult['artifacts']['plan'],'content':str((folder/'content.json').relative_to(artifact_path('.'))),'design':str((folder/'design.json').relative_to(artifact_path('.'))),'source_design':source_design_path,'source_variants':source_variants}
-        manifest={'request':original.model_dump(),'profile':parentresult.get('profile','selection'),'model_manifest':parentresult.get('model_manifest',{}),'model_calls':[],'workflow_hashes':workflow_manifest(),'timings':timings,'elapsed_seconds':elapsed,'deadline_met':elapsed<=config('pipeline.yaml')['deadline_seconds'],'palette':palette.model_dump(),'source_palette':parentresult.get('source_palette') or palette_from_design(source_design).model_dump(),'variants':variants,'candidate_scores':scores,'candidate_reasons':reasons,'image_candidates':image_candidates,'selection':selection,'slides':slides,'presentation':presentation,'artifacts':artifacts}
+        manifest={'request':original.model_dump(),'profile':parentresult.get('profile','selection'),'model_manifest':parentresult.get('model_manifest',{}),'model_calls':[],'workflow_hashes':workflow_manifest(),'timings':timings,'elapsed_seconds':elapsed,'deadline_met':elapsed<=config('pipeline.yaml')['deadline_seconds'],'logic_findings':[finding.model_dump() for finding in logic_findings],'palette':palette.model_dump(),'source_palette':parentresult.get('source_palette') or palette_from_design(source_design).model_dump(),'variants':variants,'candidate_scores':scores,'candidate_reasons':reasons,'image_candidates':image_candidates,'selection':selection,'slides':slides,'presentation':presentation,'artifacts':artifacts}
         write_json(folder/'manifest.json',manifest);manifest['manifest']=str((folder/'manifest.json').relative_to(artifact_path('.')))
         return manifest

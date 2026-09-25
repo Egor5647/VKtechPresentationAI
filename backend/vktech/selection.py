@@ -42,7 +42,7 @@ def score_candidate(scene,slide,preview:Path|None=None):
         _,failures=graph_quality(diagram.data.get('layout','list'),diagram.data.get('items',[]),diagram.data.get('graph'))
         graph_failures.extend(failures)
     if graph_failures:
-        fatal={'edge_crossings','unreadable_labels','missing_weights','missing_metrics','unlabeled_example','uncentered_parent'}
+        fatal={'edge_crossings','unreadable_labels','incomplete_labels','missing_weights','missing_metrics','unlabeled_example','uncentered_parent'}
         score-=100 if fatal.intersection(graph_failures) else 25
         reasons['graph_failures']=sorted(set(graph_failures))
         reasons['disqualified']=bool(fatal.intersection(graph_failures))

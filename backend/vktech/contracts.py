@@ -106,7 +106,11 @@ class DiagramEdgeSpec(Contract):
 
 
 class DiagramSpec(Contract):
-    kind: Literal["fork_join", "reduction_tree", "work_span", "level_schedule", "level_bound_proof", "critical_path"]
+    kind: Literal[
+        "fork_join", "reduction_tree", "work_span", "level_schedule", "level_bound_proof", "critical_path",
+        "sequence", "comparison", "hierarchy", "layers", "memory_access", "scheduler", "formula_focus",
+        "abstraction", "pram_reality"
+    ]
     nodes: list[DiagramNodeSpec] = Field(min_length=2, max_length=16)
     edges: list[DiagramEdgeSpec] = Field(default_factory=list, max_length=32)
     educational_example: bool = False
@@ -149,6 +153,34 @@ class VisualContract(Contract):
     diagram: DiagramSpec | None = None
 
 
+class SlideLogicContract(Contract):
+    """Meaning that must survive layout, density and renderer changes."""
+    teaching_goal: str = Field(default="", max_length=300)
+    question_answered: str = Field(default="", max_length=240)
+    introduced_concepts: list[str] = Field(default_factory=list, max_length=12)
+    required_prior_concepts: list[str] = Field(default_factory=list, max_length=12)
+    source_claim_ids: list[str] = Field(default_factory=list, max_length=32)
+    main_assertion: str = Field(default="", max_length=360)
+    supporting_assertions: list[str] = Field(default_factory=list, max_length=6)
+    transition_from_previous: str = Field(default="", max_length=240)
+    transition_to_next: str = Field(default="", max_length=240)
+    visual_assertion: str = Field(default="", max_length=300)
+    required_visual_entities: list[str] = Field(default_factory=list, max_length=12)
+    required_visual_relations: list[str] = Field(default_factory=list, max_length=12)
+    semantic_payload_hash: str = Field(default="", max_length=64)
+
+
+class LogicFinding(Contract):
+    rule: Literal[
+        "L01", "L02", "L03", "L04", "L05", "L06", "L07", "L08", "L09", "L10"
+    ]
+    severity: Literal["error", "warning", "info"] = "warning"
+    slide_id: str | None = None
+    message: str
+    repair_level: Literal["local", "slide", "section", "deck"] = "slide"
+    evidence: dict = Field(default_factory=dict)
+
+
 class ContentIR(Contract):
     id: str
     title: str
@@ -184,6 +216,7 @@ class PlanSlide(Contract):
     visual_score: float = Field(default=0, ge=0, le=1)
     visual_reason: str = Field(default="", max_length=240)
     visual_contract: VisualContract = Field(default_factory=VisualContract)
+    logic_contract: SlideLogicContract = Field(default_factory=SlideLogicContract)
 
 
 class PresentationPlan(Contract):

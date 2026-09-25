@@ -373,8 +373,10 @@ def visual_contract_for(slide) -> VisualContract:
         node.weight is not None and (node.origin!='source' or node.claim_ids)
         for node in existing.nodes
     )
+    generic={'sequence','comparison','hierarchy','layers','memory_access','scheduler','formula_focus','abstraction','pram_reality'}
+    allow_generic=bool(slide.logic_contract.main_assertion or slide.logic_contract.semantic_payload_hash)
     diagram=(existing if layout not in {'work_span','critical_path'} and existing and existing.kind==layout else
-             existing if source_weighted else default_diagram(layout,slide.visual_items or entities))
+             existing if source_weighted else default_diagram(layout,slide.visual_items or entities) if allow_generic or layout not in generic else None)
     if diagram:
         _,failures=graph_quality(layout,slide.visual_items or entities,diagram)
         if failures:diagram=default_diagram(layout,slide.visual_items or entities)
@@ -823,14 +825,14 @@ def _diagram_layout(ps) -> str:
     if re.search(r'редукц|reduction|бинарн\w* дерев',title):return 'reduction_tree'
     if re.search(r'erew|crew|crcw|режим\w* доступ|set\s*\(',title):return 'memory_access'
     if re.search(r'fork.?join|разветв\w*.*объедин',title) and 'broadcast' not in title:return 'fork_join'
-    if re.search(r'2-аппроксимац|level.by.level.+доказ',title):return 'level_bound_proof'
+    if re.search(r'2(?:-аппроксимац|[×x])|level.by.level.+доказ',title):return 'level_bound_proof'
     if re.search(r'level.by.level|выполнен\w*\s+по\s+уровн',title):return 'level_schedule'
     if re.search(r'work\s+и\s+span',title):return 'work_span'
     if re.search(r'critical path|критическ\w* путь',title):return 'critical_path'
     if re.search(r'формул|неравен|верхн\w* границ|нижн\w* границ',title):return 'formula_focus'
     if re.search(r'scheduler|планиров|work stealing|очеред',title):return 'scheduler'
     if re.search(r'разделен\w* сло|три слоя|уровн\w* абстракц',text):return 'layers'
-    if ps.archetype=='comparison' or re.search(r'сравн|различ|trade.?off|ограничен',title):return 'comparison'
+    if ps.archetype=='comparison' or re.search(r'сравн|различ|разн\w* свойств|trade.?off|ограничен',title):return 'comparison'
     if ps.archetype=='process' or ps.visual=='sequence':return 'sequence'
     return ps.visual
 
@@ -928,7 +930,8 @@ def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, j
         for si,ps in enumerate(plan.slides):
             visual='table' if ps.dataset_id and variant=='C' else 'chart' if ps.dataset_id else ps.visual
             diagram_layout=_diagram_layout(ps)
-            semantic_diagram=diagram_layout in {'fork_join','reduction_tree','work_span','critical_path','level_schedule','level_bound_proof'}
+            semantic_mode=bool(ps.logic_contract.semantic_payload_hash)
+            semantic_diagram=semantic_mode and ps.visual_strategy=='diagram'
             is_cover=ps.role=='cover' or si==0
             last=si==len(plan.slides)-1
             if (is_cover or last) and dark:
@@ -1040,7 +1043,9 @@ def build_scenes(design: DesignIR, content: ContentIR, plan: PresentationPlan, j
                             nodes.append(Node(id=f'{ps.id}-support-{idx+1}',kind='text',role='support',box=Box(x=x,y=y,w=w,h=h),style=support_style,text=text,claim_ids=ps.claim_ids))
             if visual!='none' and not is_cover and not last:
                 kind='diagram' if visual in {'sequence','list','hierarchy'} else visual
-                items=_diagram_items(ps,claims)[:{'A':2,'B':3,'C':3}[variant]]
+                # Density changes prose and composition, never the entities or
+                # relations asserted by a visual.
+                items=_diagram_items(ps,claims) if semantic_mode else _diagram_items(ps,claims)[:{'A':2,'B':3,'C':3}[variant]]
                 data=datasets[ps.dataset_id].model_dump() if ps.dataset_id else assets[ps.asset_id].model_dump() if ps.asset_id else {'layout':diagram_layout,'items':items,'accent':slide_accent,'surface':surface,'graph':ps.visual_contract.diagram.model_dump() if ps.visual_contract.diagram else None}
                 visualstyle=_style(style_body,design,p.background);visualstyle.size=_scale_size(design,20,22)
                 visualstyle.fill=surface
