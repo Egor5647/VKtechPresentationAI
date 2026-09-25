@@ -48,12 +48,16 @@ def main():
             print('Configured text and image models are available.')
             if args.chat:
                 model=configured[0]
-                body={'model':model,'messages':[{'role':'user','content':'Return exactly: OK'}],'temperature':0,'max_tokens':8}
+                # Reasoning-capable models may spend part of the output budget on
+                # hidden reasoning before producing the visible answer. Eight
+                # tokens can therefore yield a valid HTTP response with empty
+                # content, so leave enough room for both parts.
+                body={'model':model,'messages':[{'role':'user','content':'Return exactly: OK'}],'temperature':0,'max_tokens':128}
                 chat=client.post(base+'/chat/completions',headers={**headers,'Content-Type':'application/json'},json=body)
                 if chat.status_code!=200:
                     print(f'Test generation failed: HTTP {chat.status_code}',file=sys.stderr);return 1
                 content=chat.json().get('choices',[{}])[0].get('message',{}).get('content','')
-                if not content:
+                if not str(content).strip():
                     print('Test generation returned no text',file=sys.stderr);return 1
                 print('Minimal text generation succeeded.')
     except (httpx.HTTPError,ValueError,json.JSONDecodeError) as exc:
