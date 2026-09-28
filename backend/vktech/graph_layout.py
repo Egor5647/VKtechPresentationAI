@@ -283,12 +283,19 @@ def _short_concept(value: str,max_words=4) -> str:
         (r'выполнен\w*\s+после\s+предшественник\w*','Готовая задача'),
         (r'сложени\w*\s+пар\w*','Сложение пары'),
         (r'копировани\w*','Копирование'),
+        (r'nested\s+parallel\s+loops?|nested\s+loops?','Глубины складываются'),
+        (r'ошибк\w*.*перемнож','Глубины не умножают'),
     )
     for pattern,label in replacements:
         if re.search(pattern,value,re.I):return label
     words=value.split();chosen=words[:max_words]
     while len(' '.join(chosen))>24 and len(chosen)>1:chosen.pop()
     result=' '.join(chosen)
+    # Removing words to fit a node must not leave half of a formula.  Keep the
+    # readable concept label and discard only the unfinished parenthesized
+    # suffix; the complete formula remains in the slide text and contract.
+    if result.count('(')!=result.count(')'):
+        result=result[:result.find('(')].rstrip(' Θ,.:;')
     # A single identifier can legitimately reach the box limit. Never cut a
     # multiword fact or formula in the middle of a token.
     return (result if len(result)<=24 else result[:24]).rstrip(' ,:;') or 'Задача'

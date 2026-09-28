@@ -248,7 +248,7 @@ def contextual_audit(gateway,scene,content,images):
                 sheet.paste(thumb,(x,y+24));draw.rectangle((x,y,x+width,y+24),fill='white');draw.text((x+6,y+5),slide.id,fill='black')
             contact=Path(temp)/'contact-sheet.png';sheet.save(contact,'PNG',optimize=True);model_images=[contact]
         report=gateway.structured('vision_audit',{'audit_mode':'failures_only' if failures_only else 'complete','visual_input':'One labeled contact sheet; labels are exact slide_id values.' if len(images)>1 else 'One slide image.','image_order':[s.id for s in scene.slides],'scene':compact_scene,'content':compact_content,'rules':{f'C{i:02}':name for i,name in enumerate(('Заголовок содержит вывод','Соответствие заголовку','Единая мысль','Факты из материалов','Есть содержание','Уместность изображений','Служебный мусор','Опечатки','Единый язык','Уместность данных','Связность соседних слайдов'),1)}},schema,model_images)
-    slides={s.id:s for s in scene.slides};seen=set();result=[]
+    slides={s.id:s for s in scene.slides};claims={claim.id:claim for claim in content.claims};seen=set();result=[]
     for item in report.issues:
         if item.rule not in {f'C{i:02}' for i in range(1,12)} or item.slide_id not in slides:raise ValueError('Contextual audit returned unknown rule or slide')
         valid={n.id for n in slides[item.slide_id].nodes}
@@ -258,6 +258,20 @@ def contextual_audit(gateway,scene,content,images):
         # C04 verifies that displayed facts are supported. It must not require a
         # slide to reproduce every fact from a referenced multi-fact source chunk.
         if item.rule=='C04' and re.search(r'отсутств|не упомин|не полностью|не содержит',observation):continue
+        if item.rule=='C04' and item.status=='fail' and re.search(r'нижн\w*.*верхн\w*|lower.*upper|upper.*lower',observation,re.I):
+            visible=' '.join(node.text for node in slides[item.slide_id].nodes if node.text)
+            claim_ids={cid for node in slides[item.slide_id].nodes for cid in node.claim_ids}
+            source=' '.join(claims[cid].text for cid in claim_ids if cid in claims)
+            directions={
+                'lower':r'\bне\s+(?:менее|ниже|меньше)|≥|\bнижн\w*\s+границ\w*|\blower\s+bound',
+                'upper':r'\bне\s+(?:более|выше)|\bне\s+превыш\w*|≤|\bверхн\w*\s+границ\w*|\bupper\s+bound',
+            }
+            visible_directions={name for name,pattern in directions.items() if re.search(pattern,visible,re.I)}
+            source_directions={name for name,pattern in directions.items() if re.search(pattern,source,re.I)}
+            # Deterministic source grounding wins over a vision-auditor claim
+            # that confuses a lower bound with a separate upper-bound formula
+            # from the same source chunk.
+            if visible_directions and visible_directions<=source_directions:continue
         # Repetition between prose and a useful native diagram is not service
         # debris. C07 is reserved for actual headers, page numbers and placeholders.
         if item.rule=='C07' and re.search(r'повтор|дублир',observation) and not re.search(r'конспект|стр\.?\s*\d|todo|lorem|заглуш',observation):continue

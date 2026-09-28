@@ -90,6 +90,17 @@ def test_fallback_graphs_use_semantic_labels_and_one_shape(name):
     assert result.occupancy>=.55
 
 
+def test_sequence_fallback_never_leaves_an_unclosed_formula_label():
+    spec=default_diagram('sequence',[
+        'Broadcast: CREW Θ(1), EREW Θ(log n)',
+        'Nested loops: Θ(log n + log m)',
+        'Ошибка: перемножение глубин',
+    ])
+    _,failures=graph_quality('sequence',[],spec)
+    assert 'incomplete_labels' not in failures
+    assert all(node.label.count('(')==node.label.count(')') for node in spec.nodes)
+
+
 def test_rendered_math_uses_typographic_subscripts():
     assert _math_display('T_P ≥ W/P; T_level ≤ 2T*')=='Tₚ ≥ W/P; Tₗₑᵥₑₗ ≤ 2T*'
 

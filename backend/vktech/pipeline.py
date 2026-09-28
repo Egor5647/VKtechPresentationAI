@@ -9,7 +9,7 @@ from .contracts import ContentIR,DesignIR,GenerateRequest,SceneIR,AuditReport,Re
 from .store import Store
 from .settings import artifact_path,ROOT,config
 from .model import ModelGateway
-from .planning import plan_with_model,build_scenes,regenerate_slide_with_model,enrich_plan,validate_plan,assign_visual_strategies,protect_text_from_template_decor,visual_contract_for,usable_prototypes
+from .planning import plan_with_model,build_scenes,regenerate_slide_with_model,enrich_plan,fit_semantic_variants,validate_plan,assign_visual_strategies,protect_text_from_template_decor,visual_contract_for,usable_prototypes
 from .template import import_template
 from .export import export_pptx,render,export_html
 from .audit import audit_scene,audit_rendered_deck,contextual_audit,project_contextual_issues,repair_scene
@@ -133,14 +133,21 @@ class Pipeline:
                 previous=previous.model_copy(deep=True);previous.id=candidate.id;previous.version+=1
                 previous.slides[index]=candidate.slides[index];scenes.append(previous)
         elif recompose:
-            plan=restructure_known_curriculum(plan,content)
+            # First normalize any legacy overflow, then restore a checkpoint
+            # that semantic compaction may have moved out of the visible text.
+            plan=restructure_known_curriculum(fit_semantic_variants(plan),content)
             plan=assign_visual_strategies(plan,content,original.generate_images)
-            plan=enrich_logic_contracts(enrich_plan(enrich_logic_contracts(plan),content));validate_plan(plan,content,original.slide_count)
+            # Density variants were validated when the model plan was
+            # accepted.  This pass guards facts, lengths and references after
+            # curriculum repair while keeping legacy plans readable.
+            validate_plan(plan,content,original.slide_count,validate_density=False)
+            plan=enrich_logic_contracts(enrich_plan(enrich_logic_contracts(plan),content))
             write_json(folder/'plan.json',plan.model_dump());scenes=build_scenes(design,content,plan,job.id)
         else:
             before=time.monotonic();plan=plan_with_model(self.gateway,content,original);timings['planning']=time.monotonic()-before
-            plan=restructure_known_curriculum(plan,content)
+            plan=restructure_known_curriculum(fit_semantic_variants(plan),content)
             plan=assign_visual_strategies(plan,content,original.generate_images)
+            validate_plan(plan,content,original.slide_count,validate_density=False)
             if original.generate_images:
                 candidates=sorted((ps for ps in plan.slides if ps.visual_strategy=='generated_image'),key=lambda ps:(-ps.visual_score,ps.id))[:config('pipeline.yaml')['max_generated_image_slides']]
                 image_started=time.monotonic();generated_count=0
@@ -150,7 +157,7 @@ class Pipeline:
                 timings['image_generation']=round(time.monotonic()-image_started,3);timings['generated_image_count']=generated_count
             plan=enrich_logic_contracts(enrich_plan(enrich_logic_contracts(plan),content))
             write_json(folder/'plan.json',plan.model_dump());scenes=build_scenes(design,content,plan,job.id)
-        logic_findings=audit_deck_logic(plan) if plan else []
+        logic_findings=audit_deck_logic(plan,content) if plan else []
         if plan:validate_variant_semantics(plan,scenes)
         write_json(folder/'content.json',content.model_dump());write_json(folder/'design.json',design.model_dump())
         stage('layout_export_render')
@@ -315,7 +322,7 @@ class Pipeline:
         for candidates in image_candidates.values():
             for candidate in candidates:candidate['path']=replacements.get(candidate['path'],candidate['path'])
         plan=PresentationPlan.model_validate_json(artifact_path(parentresult['artifacts']['plan']).read_bytes())
-        logic_findings=audit_deck_logic(plan)
+        logic_findings=audit_deck_logic(plan,content)
         # A recompose job may carry old source_variants only to preserve palette
         # provenance.  While the deck is still in its source palette, the
         # parent's current variants are the authoritative geometry.  Once a

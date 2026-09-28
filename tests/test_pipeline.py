@@ -8,7 +8,7 @@ from vktech.planning import NeedsInput,build_scenes,validate_plan,plan_with_mode
 from vktech.export import export_pptx,export_html,_card_font_size
 from vktech.opc import Package
 from vktech.audit import audit_scene,audit_rendered_deck,repair_scene,contrast
-from vktech.contracts import Box,DiagramSpec,Node,PaletteSpec,RepairRequest,GenerateRequest,PresentationPlan,SceneIR,Slot,Style,ImageSelection,ImageCandidateScore
+from vktech.contracts import Box,DiagramSpec,Node,PaletteSpec,PlanSlide,RepairRequest,GenerateRequest,PresentationPlan,SceneIR,Slot,Style,ImageSelection,ImageCandidateScore
 from vktech.palette import palette_from_design,recolor_design,recolor_scene,recolor_template
 from vktech.store import Store,Job
 from vktech.worker import execute
@@ -116,6 +116,28 @@ def test_density_fit_composes_whole_authored_sentences_without_clipping(plan):
     assert len(fitted.message)<=220 and '…' not in fitted.message and '...' not in fitted.message
     assert fitted.message!=fitted.takeaway and fitted.message!=fitted.balanced_message
     assert len(fitted.takeaway)<len(fitted.balanced_message)<len(fitted.message)
+
+
+def test_density_fit_accepts_provider_overflow_before_semantic_compaction():
+    slide=PlanSlide(
+        id='slide-1',title='Пределы параллелизма',claim_ids=['claim-1'],
+        takeaway='Span ограничивает ускорение.',
+        balanced_message='Span задаёт критический путь и ограничивает ускорение даже при большом числе процессоров.',
+        message=(
+            'Work измеряет всю выполненную работу, а Span задаёт критический путь вычисления. '
+            'Эти метрики дают нижние границы T_P ≥ W/P и T_P ≥ S для любого допустимого расписания. '
+            'Даже при большом числе процессоров ускорение ограничено зависимостями на критическом пути. '
+            'Практическая оптимизация сначала сохраняет Work-optimality, а затем уменьшает Span. '
+            'Все формулы и оговорки должны оставаться законченными мыслями без механического обрыва.'
+        ),
+        support_points=['Нижние границы сохраняются полностью.'],
+    )
+    assert len(slide.message)>360
+    fitted=fit_semantic_variants(PresentationPlan(slides=[slide])).slides[0]
+    assert len(fitted.message)<=220
+    assert fitted.message.endswith('.')
+    assert '…' not in fitted.message and '...' not in fitted.message
+    assert 'Span' in fitted.message
 
 
 def test_density_fit_removes_repeated_sentences_and_repairs_pdf_formula(plan):

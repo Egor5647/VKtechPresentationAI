@@ -29,6 +29,20 @@ def _concepts(slide: PlanSlide) -> list[str]:
     return [item for item in known if re.search(re.escape(item),text,re.I)][:12]
 
 
+def _canonical_concept(value: str) -> str | None:
+    aliases=(
+        (r'\bpram\b|модел\w*\s+pram','PRAM'),
+        (r'\berew\b','EREW'),(r'\bcrew\b','CREW'),(r'\bcrcw\b','CRCW'),
+        (r'\bwork\b','Work'),(r'\bspan\b','Span'),(r'\bdag\b','DAG'),
+        (r'fork.?join','Fork–Join'),
+        (r'scheduler|scheduling|планиров','scheduler'),
+        (r'критическ\w*\s+пут','критический путь'),
+        (r'нижн\w*\s+границ|lower\s+bounds?','нижние границы'),
+        (r'общ\w*\s+памят','общая память'),(r'редукц','редукция'),
+    )
+    return next((canonical for pattern,canonical in aliases if re.search(pattern,value,re.I)),None)
+
+
 def semantic_payload(slide: PlanSlide) -> dict:
     contract=slide.logic_contract
     diagram=slide.visual_contract.diagram
@@ -52,7 +66,12 @@ def enrich_logic_contracts(plan: PresentationPlan) -> PresentationPlan:
     introduced=[]
     for index,slide in enumerate(result.slides):
         contract=slide.logic_contract.model_copy(deep=True)
-        concepts=contract.introduced_concepts or _concepts(slide)
+        # Narrative prerequisites are computed from the final visible slide.
+        # Free-form model labels such as "DAG-зависимости" and "DAG" are not
+        # stable identifiers and previously produced false missing-prerequisite
+        # errors even when the concept was already explained.
+        explicit=[_canonical_concept(value) for value in contract.introduced_concepts]
+        concepts=list(dict.fromkeys([value for value in [*explicit,*_concepts(slide)] if value]))
         current=[concept for concept in concepts if concept not in introduced]
         if not contract.teaching_goal:
             contract.teaching_goal=('Сформировать карту темы и ожидаемый результат.' if slide.role=='cover'
@@ -61,8 +80,11 @@ def enrich_logic_contracts(plan: PresentationPlan) -> PresentationPlan:
             contract.question_answered=('Что читатель сможет объяснить после презентации?' if slide.role=='cover'
                                         else 'Как устроено: '+slide.title.rstrip('?')+'?')
         contract.introduced_concepts=current
-        if not contract.required_prior_concepts:
-            contract.required_prior_concepts=[concept for concept in concepts if concept in introduced][-4:]
+        explicit_priors=[_canonical_concept(value) for value in contract.required_prior_concepts]
+        contract.required_prior_concepts=list(dict.fromkeys([
+            value for value in [*explicit_priors,*concepts]
+            if value and value not in current
+        ]))[-4:]
         contract.source_claim_ids=list(slide.claim_ids)
         contract.main_assertion=contract.main_assertion or slide.takeaway or slide.message
         contract.supporting_assertions=list(contract.supporting_assertions or slide.support_points)
@@ -71,13 +93,18 @@ def enrich_logic_contracts(plan: PresentationPlan) -> PresentationPlan:
         if index+1<len(result.slides) and not contract.transition_to_next:
             contract.transition_to_next=f'Далее: {result.slides[index+1].title}.'
         contract.visual_assertion=contract.visual_assertion or slide.visual_contract.goal
-        contract.required_visual_entities=list(contract.required_visual_entities or slide.visual_items or slide.visual_contract.entities)
-        # Arrows are mandatory only when the visual contract contains an
-        # explicit edge. Comparison cards express contrast by alignment and
-        # labels; inventing causal arrows between alternatives would be wrong.
-        if not contract.required_visual_relations:
-            diagram=slide.visual_contract.diagram
-            contract.required_visual_relations=list(slide.visual_contract.relations if diagram and diagram.edges else [])
+        diagram=slide.visual_contract.diagram
+        if slide.visual_strategy=='diagram' and diagram:
+            # The deterministic graph builder may replace an unsafe draft from
+            # the model.  Audit the geometry that will actually be rendered,
+            # rather than stale entity names from the draft contract.
+            contract.required_visual_entities=[node.label for node in diagram.nodes][:12]
+            contract.required_visual_relations=[
+                f'{edge.source} → {edge.target}' for edge in diagram.edges
+            ][:12]
+        else:
+            contract.required_visual_entities=list(slide.visual_items or slide.visual_contract.entities)
+            contract.required_visual_relations=[]
         slide.logic_contract=contract
         slide.logic_contract.semantic_payload_hash=semantic_hash(slide)
         introduced.extend(current)
@@ -89,7 +116,7 @@ def _near_duplicate(left: str,right: str) -> float:
     return len(a&b)/max(1,min(len(a),len(b)))
 
 
-def audit_deck_logic(plan: PresentationPlan) -> list[LogicFinding]:
+def audit_deck_logic(plan: PresentationPlan,content: ContentIR|None=None) -> list[LogicFinding]:
     findings=[];introduced=set()
     for index,slide in enumerate(plan.slides):
         logic=slide.logic_contract
@@ -131,6 +158,7 @@ def audit_deck_logic(plan: PresentationPlan) -> list[LogicFinding]:
         covered=set().union(*(_tokens(slide.logic_contract.main_assertion) for slide in plan.slides[:-1]))
         if len(_tokens(conclusion.message)&covered)<2:
             findings.append(LogicFinding(rule='L10',severity='warning',slide_id=conclusion.id,message='Итог не связывает ключевые идеи презентации.',repair_level='slide'))
+    if content is not None:findings.extend(curriculum_findings(plan,content))
     return findings
 
 
@@ -152,44 +180,178 @@ def validate_variant_semantics(plan: PresentationPlan,scenes) -> None:
             raise ValueError(f'Variants change semantic payload on slide {slide.id}')
 
 
-def _slide(slide_id,title,claim,message,balanced,takeaway,support=(),visual='none',items=(),archetype='explanation',role='content'):
-    return PlanSlide(id=slide_id,title=title,message=message,balanced_message=balanced,takeaway=takeaway,
-        support_points=list(support),claim_ids=[claim],visual=visual,visual_items=list(items),archetype=archetype,role=role)
+
+_PRAM_MARKERS=(r'\bPRAM\b',r'\bEREW\b',r'\bWork\b',r'\bSpan\b',r'level-by-level',r'Set\s*\(\s*A\s*,\s*x\s*\)')
+_PRAM_CHECKPOINTS=(
+    {
+        'id':'access-models','label':'Режимы доступа PRAM: EREW, CREW и CRCW.',
+        'fact':'EREW, CREW и CRCW задают разные правила совместного доступа в PRAM.',
+        'groups':((r'\bpram\b',),(r'\berew\b',),(r'\bcrew\b',),(r'\bcrcw\b',)),
+        'source':(r'режимы доступа',r'\berew\b.*\bcrew\b.*\bcrcw\b'),
+    },
+    {
+        'id':'reduction','label':'Бинарная редукция: Work Θ(n), Span Θ(log n).',
+        'fact':'Бинарная редукция имеет Work Θ(n) и Span Θ(log n).',
+        'groups':((r'редукц',),(r'work.{0,35}(?:θ|theta)\s*\(?n',),(r'span.{0,45}(?:log\s*n|логариф)',)),
+        'source':(r'редукц',r'число активных значений'),
+    },
+    {
+        'id':'fork-join-dag','label':'Fork–Join как DAG задач и зависимостей.',
+        'fact':'Fork создаёт независимые ветви, а join добавляет зависимости DAG.',
+        'groups':((r'fork',),(r'join',),(r'\bdag\b|ациклич',)),
+        'source':(r'fork.?join',r'\bdag\b'),
+    },
+    {
+        'id':'work-span','label':'Work как общая работа, Span как критический путь.',
+        'fact':'Work суммирует работу, а Span равен длине критического пути.',
+        'groups':((r'\bwork\b',),(r'\bspan\b',),(r'критическ\w*\s+пут',)),
+        'source':(r'work.{0,80}span',r'критическ\w*\s+пут'),
+    },
+    {
+        'id':'lower-bounds','label':'Нижние границы T_P ≥ W/P и T_P ≥ S.',
+        'fact':'Для любого допустимого планировщика T_P ≥ W/P и T_P ≥ S.',
+        'groups':((r'(?:t[_ ]?p|tₚ).{0,25}(?:≥|>=).{0,20}w\s*/\s*p',),(r'(?:t[_ ]?p|tₚ).{0,25}(?:≥|>=).{0,12}s\b',)),
+        'source':(r'нижн\w* границ',r't[_ ]?p.*w\s*/\s*p'),
+    },
+    {
+        'id':'schedulers','label':'Различие level-by-level и greedy scheduler.',
+        'fact':'Level-by-level ждёт уровень, а greedy запускает любую готовую задачу.',
+        'groups':((r'level-by-level',),(r'\bgreedy\b',)),
+        'source':(r'level-by-level',r'greedy'),
+    },
+    {
+        'id':'level-bound','label':'Верхняя граница level-by-level: W/P + S.',
+        'fact':'Level-by-level завершается не позже W/P + S в unit-cost DAG.',
+        'groups':((r'level-by-level',),(r'w\s*/\s*p\s*\+\s*s',),(r'unit-cost',)),
+        'source':(r'формул\w* брента',r'w\s*/\s*p\s*\+\s*s'),
+    },
+    {
+        'id':'work-optimality','label':'Сначала Work-optimality, затем уменьшение Span.',
+        'fact':'Сначала сохраняют Work-optimality, затем уменьшают Span.',
+        'groups':((r'work-optimal|оптимальн\w*\s+по\s+(?:работ|work)',),(r'\bspan\b',)),
+        'source':(r'work-optimal',r'порядок полезного параллелизма'),
+    },
+    {
+        'id':'real-machine','label':'Ограничения реальной машины: память, locality и overhead.',
+        'fact':'Реальная машина добавляет задержки памяти, locality и overhead задач.',
+        'groups':((r'кэш|cache|numa|памят',),(r'overhead|накладн|contention|locality',)),
+        'source':(r'cache|кэш|numa',r'overhead|contention|locality'),
+    },
+    {
+        'id':'broadcast','label':'Broadcast: CREW Θ(1), EREW Θ(log n).',
+        'fact':'Broadcast занимает Θ(1) в CREW и Θ(log n) в EREW при P=n.',
+        'groups':((r'broadcast',),(r'\bcrew\b',),(r'\berew\b',),(r'(?:θ|o)\s*\(?1\)?',),(r'(?:θ|o)\s*\(?log\s*n',)),
+        'source':(r'broadcast',r'дерев\w* распростран'),
+    },
+    {
+        'id':'set-complexity','label':'Set(A,x): EREW Θ(log n), CREW/CRCW Θ(1), Work Θ(n).',
+        'fact':'Set(A,x): EREW — Θ(log n), CREW и CRCW — Θ(1), Work — Θ(n).',
+        'groups':((r'set\s*\(\s*a\s*,\s*x\s*\)',),(r'\berew\b',),(r'\bcrew\b',),(r'\bcrcw\b',),(r'(?:θ|o)\s*\(?log\s*n',),(r'(?:θ|o)\s*\(?1\)?',)),
+        'source':(r'set\s*\(\s*a\s*,\s*x\s*\)',),
+    },
+    {
+        'id':'two-approximation','label':'Level-by-level не хуже 2× оптимального расписания.',
+        'fact':'Для unit-cost DAG выполняется T_level ≤ 2T*.',
+        'groups':((r'level-by-level|t[_ ]?level',),(r'2\s*[×x*]?\s*(?:t\*|оптим)',)),
+        'source':(r'2\s*раз|2\s*[×x*]?\s*t\*|2-аппрокс',),
+    },
+)
 
 
-def restructure_known_curriculum(plan: PresentationPlan,content: ContentIR) -> PresentationPlan:
-    """Repair the known PRAM lecture into a source-backed pedagogical sequence.
-
-    Other subjects keep the generated plan and still receive the generic logic
-    contract and audit. This profile is activated only by strong corpus markers.
-    """
+def _pram_profile(content: ContentIR) -> bool:
     corpus=' '.join(claim.text for claim in content.claims)
-    if len(plan.slides)!=20 or not all(re.search(marker,corpus,re.I) for marker in ('EREW','Work','Span','level-by-level',r'Set\(A,\s*x\)')):
-        return plan
-    slides=[
-      _slide('slide-1','PRAM, Work/Span и планирование','claim-1','Презентация строит единый путь от модели общей памяти к DAG, метрикам Work/Span и гарантиям планировщиков. В конце эти идеи применяются к двум задачам с доказательствами.','От PRAM и DAG перейдём к Work/Span, планированию и двум доказанным примерам.','От модели памяти — к доказуемым границам параллельного выполнения.',('Сначала определим модель и зависимости.','Затем выведем и применим границы времени.'),role='cover',archetype='cover'),
-      _slide('slide-2','Карта обучения: от доступа к гарантиям','claim-2','Сначала разделим правила памяти и зависимости, затем измерим Work и Span, выведем оценки планировщиков и применим их к Set(A, x) и 2-аппроксимации.','Маршрут: память → DAG → Work/Span → планировщики → доказательства.','Каждый следующий блок опирается на понятия предыдущего.',('Различать EREW, CREW и CRCW.','Читать DAG и находить критический путь.','Обосновывать время через Work и Span.'),'sequence',('PRAM и доступ','DAG и зависимости','Work/Span и границы'),archetype='process'),
-      _slide('slide-3','Обозначения: n, P, W, S и T_P','claim-3','n — размер входа, P — число доступных процессоров, W — суммарная работа DAG, S — длина критического пути, а T_P — время выполнения на P процессорах.','W описывает весь объём работы, S — неизбежную последовательную цепочку, T_P — фактическое время на P процессорах.','Пять обозначений связывают алгоритм, ресурсы и время.',('n и P задают вход и доступные ресурсы.','W и S вычисляются по DAG.','T_P сравнивается с W/P и S.'),'list',('n — размер входа','P — процессоры','W, S, T_P — метрики'),archetype='formula'),
-      _slide('slide-4','Конкурентность и параллелизм — разные свойства','claim-6','Конкурентность организует перекрывающиеся задачи и общий state, а параллелизм означает одновременное выполнение независимой работы. Race-free код при этом не обязательно масштабируется.','Concurrency управляет пересечением задач; parallelism использует независимую вычислительную работу.','Отсутствие гонок ещё не означает хорошего ускорения.',('Блокировка может убрать race и одновременно увеличить последовательную часть.','CPU-параллелизм полезен только при независимой работе.'),'list',('Конкурентность','Параллелизм','Масштабируемость'),archetype='comparison'),
-      _slide('slide-5','Три слоя анализа нельзя смешивать','claim-5','Модель памяти отвечает, допустим ли доступ к данным; DAG фиксирует обязательные зависимости; Work и Span оценивают стоимость. Корректность на одном слое не гарантирует качество на другом.','Память задаёт допустимость, DAG — порядок, Work/Span — производительность.','Один алгоритм нужно проверить на трёх независимых слоях.',('Race-free не гарантирует малый Span.','Малый Span не отменяет большую общую работу.'),'hierarchy',('Модель памяти','DAG-зависимости','Work и Span')), 
-      _slide('slide-6','PRAM: три режима доступа к общей памяти','claim-8','PRAM выполняет синхронные шаги над общей памятью. EREW запрещает совместные чтения и записи; CREW разрешает совместное чтение; CRCW разрешает и совместную запись с заданной политикой конфликта.','EREW, CREW и CRCW различаются только разрешениями на одновременный доступ к одной ячейке.','Режим доступа определяет допустимый алгоритм.',('CRCW требует политики common, arbitrary или priority.','PRAM намеренно не учитывает кэши, NUMA и задержки.'),'list',('EREW: один читатель и писатель','CREW: много читателей','CRCW: много писателей'),archetype='comparison'),
-      _slide('slide-7','EREW-редукция: пары без конфликтов','claim-10','На каждом раунде процессор читает уникальную пару частичных сумм и пишет в уникальную ячейку. Число активных значений уменьшается вдвое до одного результата.','Уникальные пары соблюдают EREW, а дерево сокращает число значений вдвое за раунд.','Редукция имеет Work Θ(n) и Span Θ(log n).',('Между раундами нужен барьер.','Для неполной пары добавляют нейтральный элемент или отдельную обработку.'),'hierarchy',('Исходные значения','Парные суммы','Итоговая сумма'),archetype='example'),
-      _slide('slide-8','Parallel for объявляет независимость итераций','claim-13','Parallel for разрешает исполнять независимые итерации параллельно, но не обещает отдельный процессор каждой итерации. Планировщик распределяет доступную работу между P исполнителями.','Parallel for описывает независимость, а scheduler решает, когда и где выполнить итерации.','Корректность требует независимых итераций.',('Static scheduling дешевле для ровной нагрузки.','Dynamic scheduling лучше балансирует неоднородную работу, но добавляет overhead.'),'sequence',('Независимые итерации','Очередь готовых задач','P исполнителей'),archetype='process'),
-      _slide('slide-9','Fork–Join превращает выполнение в DAG','claim-14','Fork создаёт независимые ветви, join задаёт ожидание, а ребро u→v запрещает запуск v до завершения u. Готовая вершина имеет завершённых предшественников.','В DAG вершины — задачи, рёбра — обязательные ожидания, ready-вершины доступны планировщику.','Fork раскрывает параллелизм, join добавляет зависимость.',('Любая топологическая сортировка задаёт корректный последовательный порядок.','Лишний общий join увеличивает Span.'),'hierarchy',('Fork','Независимые задачи','Join'),archetype='process'),
-      _slide('slide-10','Work и Span описывают один DAG с двух сторон','claim-16','Work W — сумма стоимостей всех вершин DAG. Span S — максимальная сумма весов вдоль пути зависимостей. Один измеряет весь объём работы, другой — то, что нельзя распараллелить.','Work суммирует все вершины, Span выделяет самый длинный зависимый путь.','W и S — разные характеристики одного графа.',('При unit-cost W равно числу вершин.','При бесконечных ресурсах время равно S.'),'hierarchy',('Все вершины дают W','Критический путь даёт S','Один DAG'),archetype='formula'),
-      _slide('slide-11','Две неизбежные нижние границы','claim-17','За такт P процессоров выполняют не более P единиц работы, поэтому T_P ≥ W/P. Критический путь исполняется последовательно, поэтому T_P ≥ S. Вместе T_P ≥ max(W/P, S).','Время ограничено и объёмом работы, и критическим путём: T_P ≥ max(W/P, S).','Ни один допустимый scheduler не обходит обе границы.',('W/P — ограничение ресурсов.','S — ограничение зависимостей.'),'sequence',('T_P ≥ W/P','T_P ≥ S','T_P ≥ max(W/P, S)'),archetype='formula'),
-      _slide('slide-12','Два планировщика используют готовность по-разному','claim-18','Level-by-level ждёт завершения всего уровня, даже если часть потомков уже готова. Greedy запускает любую ready-задачу на свободном worker; work stealing реализует эту идею через локальные очереди.','Level-by-level синхронизирует уровни; greedy использует готовые задачи без общего барьера.','Greedy обычно сокращает простой между уровнями.',('Level-by-level удобен для доказательства верхней границы.','Work stealing снижает центральное contention, но может ухудшить locality.'),'list',('Level-by-level: барьер','Greedy: ready-задачи','Work stealing: локальные очереди'),archetype='comparison'),
-      _slide('slide-13','Оценка level-by-level складывается по уровням','claim-19','Уровень с w_i unit-задачами занимает ⌈w_i/P⌉ тактов. Сумма по уровням не превышает W/P + S, потому что Σw_i=W, а число уровней L не больше S.','T_level = Σ⌈w_i/P⌉ ≤ W/P + S при unit-cost DAG.','Уровни дают конструктивную верхнюю границу.',('Каждый уровень выполняется только после предыдущего.','Добавка округления суммарно ограничена числом уровней.'),'hierarchy',('Уровни DAG','Σ⌈w_i/P⌉','W/P + S'),archetype='formula'),
-      _slide('slide-14','Greedy-bound следует из занятых и пустых слотов','claim-20','В P·T_P процессорных слотах ровно W заняты работой. В каждом неполном такте выполняется вершина критического пути остатка, поэтому пустых слотов не больше (P−1)S.','Greedy не требует знания уровней: P·T_P ≤ W+(P−1)S, значит T_P ≤ W/P+(P−1)S/P.','Greedy достигает O(W/P+S) без знания уровней.',('Неполных тактов не больше S.','В неполном такте пусты не более P−1 слотов.'),'sequence',('W занятых слотов','Не более (P−1)S пустых','Граница T_P'),archetype='formula'),
-      _slide('slide-15','Сначала Work-optimality, затем малый Span','claim-21','Work-optimal алгоритм сохраняет порядок лучшей последовательной работы. После этого уменьшают Span; ориентир насыщения P≈W/S показывает, когда дальнейшие процессоры почти не улучшают идеальное время.','Сначала сохраняют Work, затем уменьшают Span; полезный масштаб P имеет порядок W/S.','Малый Span не оправдывает асимптотически лишнюю работу.',('W/S — средний доступный параллелизм, а не готовое число потоков.','Неравномерная ширина DAG ограничивает загрузку.'),'sequence',('Work-optimality','Уменьшение Span','Насыщение P≈W/S'),archetype='process'),
-      _slide('slide-16','Реальная машина добавляет цену памяти и задач','claim-22','PRAM скрывает data movement, кэши, NUMA, contention, стоимость fork/join и планировщика. Поэтому асимптотическая оценка задаёт ориентир, а не точный wall-clock.','Реальное время дополняют задержки памяти, overhead задач и конкуренция за ресурсы.','После анализа DAG нужно проверить ограничения машины.',('Слишком мелкие задачи могут проиграть из-за spawn и sync.','Bandwidth и locality способны стать главным bottleneck.'),'list',('Память и NUMA','Overhead задач','Contention и locality'),archetype='comparison'),
-      _slide('slide-17','Broadcast: CREW читает сразу, EREW распространяет','claim-24','В CREW все процессоры могут одновременно прочитать X, поэтому broadcast занимает O(1) при P=n. В EREW число доступных копий удваивается за шаг, поэтому нужны Θ(log n) раундов.','CREW даёт прямое чтение X, а EREW строит дерево копирования.','Ограничение чтения меняет глубину broadcast.',('В EREW один источник за шаг обслуживает только одного нового читателя.','После t шагов доступно максимум 2^t копий.'),'hierarchy',('CREW: X → все получатели','EREW: дерево копий','O(1) против Θ(log n)'),archetype='comparison'),
-      _slide('slide-18','Set(A, x): записи не конфликтуют','claim-30','В CREW и CRCW каждый из n процессоров читает X и пишет в собственную A[i], поэтому время Θ(1), Work Θ(n). В EREW значение распространяется удвоением копий за Θ(log n).','CREW и CRCW выполняют Set за Θ(1), EREW — за Θ(log n); все режимы делают Θ(n) работы.','CRCW-write здесь не нужен: адреса A[i] различны.',('Для n=0 цикл пуст.','EREW-алгоритм поддерживает инвариант: известный префикс содержит x.'),'hierarchy',('X','A[1..n]','Дерево копирования EREW'),archetype='example'),
-      _slide('slide-19','Почему level-by-level не хуже 2× оптимума','claim-32','Для того же unit-cost DAG T_level ≤ W/P+S. Оптимальное время T* не меньше ни W/P, ни S, поэтому W/P+S ≤ 2max(W/P,S) ≤ 2T*.','Две нижние границы дают цепочку: T_level ≤ W/P+S ≤ 2max(W/P,S) ≤ 2T*.','2-аппроксимация следует из двух нижних границ.',('Сравнение использует одинаковые P и cost model.','Level-by-level — доказуемый baseline, а не лучший runtime.'),'sequence',('T_level ≤ W/P+S','T* ≥ max(W/P,S)','T_level ≤ 2T*'),archetype='formula'),
-      _slide('slide-20','Карта решения задачи о параллелизме','claim-34','Зафиксируйте модель доступа, постройте DAG, вычислите W и S, примените оценки времени, затем выберите scheduler и проверьте память, overhead и крайние случаи.','Модель → DAG → W/S → оценка времени → scheduler → проверка реальной машины.','Так анализ остаётся корректным от доказательства до реализации.',('Не смешивайте memory conflicts и зависимости DAG.','Проверяйте n=0/1, P=1, P≫W/S и неравномерную ширину.'),'sequence',('Модель и DAG','Work/Span и время','Scheduler и машина'),archetype='summary'),
-    ]
-    # Preserve all facts which the existing generated deck explicitly marked mandatory.
-    present={claim for slide in slides for claim in slide.claim_ids}
-    for required in (claim.id for claim in content.claims if claim.required and claim.id not in present):
-        target=min(slides[1:-1],key=lambda slide:len(slide.claim_ids));target.claim_ids.append(required)
-    return PresentationPlan(status='ready',slides=slides)
+    return all(re.search(marker,corpus,re.I) for marker in _PRAM_MARKERS)
+
+
+def _checkpoint_covered(checkpoint: dict, text: str) -> bool:
+    return all(any(re.search(pattern,text,re.I|re.S) for pattern in alternatives) for alternatives in checkpoint['groups'])
+
+
+def _checkpoint_claim_ids(checkpoint: dict,content: ContentIR) -> list[str]:
+    ranked=[]
+    for claim in content.claims:
+        score=sum(bool(re.search(pattern,claim.text,re.I|re.S)) for pattern in checkpoint['source'])
+        if score:ranked.append((-score,claim.source,claim.id))
+    return [claim_id for _,_,claim_id in sorted(ranked)[:3]]
+
+
+def curriculum_checkpoints(content: ContentIR,slide_count: int=20) -> list[dict]:
+    """Return source-linked requirements without prescribing slide order or wording."""
+    if slide_count<12 or not _pram_profile(content):return []
+    result=[]
+    for checkpoint in _PRAM_CHECKPOINTS:
+        item={key:value for key,value in checkpoint.items() if key not in {'groups','source'}}
+        item['claim_ids']=_checkpoint_claim_ids(checkpoint,content)
+        result.append(item)
+    return result
+
+
+def _plan_text(plan: PresentationPlan) -> str:
+    return '\n'.join(' '.join((slide.title,slide.message,slide.balanced_message,slide.takeaway,*slide.support_points,*slide.visual_items)) for slide in plan.slides)
+
+
+def apply_curriculum_guardrails(plan: PresentationPlan,content: ContentIR) -> PresentationPlan:
+    """Keep the model's story and add only missing source-backed checkpoint facts.
+
+    The previous implementation replaced every generated PRAM deck with one
+    hard-coded 20-slide plan.  Guardrails preserve authored order, titles,
+    messages and visual choices.  A missing mandatory fact is attached to the
+    most relevant source-linked slide as a short support point.
+    """
+    checkpoints=curriculum_checkpoints(content,len(plan.slides))
+    if not checkpoints:return plan
+    result=plan.model_copy(deep=True);text=_plan_text(result)
+    for checkpoint,definition in zip(checkpoints,_PRAM_CHECKPOINTS):
+        if _checkpoint_covered(definition,text):continue
+        claim_ids=set(checkpoint['claim_ids'])
+        candidates=[slide for slide in result.slides if claim_ids.intersection(slide.claim_ids)]
+        if not candidates:
+            candidates=[slide for slide in result.slides[1:-1] if slide.role=='content'] or result.slides
+        source_rank={claim_id:index for index,claim_id in enumerate(checkpoint['claim_ids'])}
+        target=min(candidates,key=lambda slide:(
+            min((source_rank[cid] for cid in slide.claim_ids if cid in source_rank),default=len(source_rank)),
+            len(slide.support_points)>=3,len(slide.support_points),len(slide.message),slide.id,
+        ))
+        if checkpoint['fact'] not in target.support_points:
+            if len(target.support_points)<3:target.support_points.append(checkpoint['fact'])
+            elif len(target.message)+len(checkpoint['fact'])+1<=220:target.message+=' '+checkpoint['fact']
+            else:target.support_points[-1]=checkpoint['fact']
+        for claim_id in checkpoint['claim_ids']:
+            if claim_id not in target.claim_ids:target.claim_ids.append(claim_id)
+        text=_plan_text(result)
+    return result
+
+
+def curriculum_findings(plan: PresentationPlan,content: ContentIR) -> list[LogicFinding]:
+    checkpoints=curriculum_checkpoints(content,len(plan.slides))
+    if not checkpoints:return []
+    text=_plan_text(plan);findings=[]
+    definitions={item['id']:item for item in _PRAM_CHECKPOINTS}
+    for checkpoint in checkpoints:
+        if not _checkpoint_covered(definitions[checkpoint['id']],text):
+            findings.append(LogicFinding(rule='L11',severity='error',message='Не раскрыта обязательная тема: '+checkpoint['label'],repair_level='deck',evidence={'checkpoint_id':checkpoint['id'],'claim_ids':checkpoint['claim_ids']}))
+    def directly_assigns(model: str,complexity: str) -> bool:
+        # EREW/CREW also occur in the broadcast example with different valid
+        # bounds.  A reversal is an error here only inside a slide that
+        # explicitly explains Set(A, x).
+        for slide in plan.slides:
+            slide_text=' '.join((slide.title,slide.message,slide.balanced_message,slide.takeaway,*slide.support_points,*slide.visual_items))
+            if not re.search(r'set\s*\(\s*a\s*,\s*x\s*\)',slide_text,re.I):continue
+            for sentence in re.split(r'(?<=[.!?;])\s+|\n+',slide_text):
+                for match in re.finditer(rf'\b{model}\b',sentence,re.I):
+                    tail=sentence[match.end():]
+                    value=re.search(complexity,tail,re.I)
+                    if value and not re.search(r'\b(?:EREW|CREW|CRCW)\b',tail[:value.start()],re.I):return True
+        return False
+    # These reversals are unequivocally inconsistent with the supplied source.
+    if directly_assigns('EREW',r'(?:Θ|theta|O)\s*\(?1\)?'):
+        findings.append(LogicFinding(rule='L12',severity='error',message='Для Set(A,x) нельзя указывать Θ(1) в EREW.',repair_level='slide',evidence={'checkpoint_id':'set-complexity'}))
+    if directly_assigns('CREW',r'(?:Θ|theta|O)\s*\(?log\s*n') or directly_assigns('CRCW',r'(?:Θ|theta|O)\s*\(?log\s*n'):
+        findings.append(LogicFinding(rule='L12',severity='error',message='Для Set(A,x) CREW и CRCW имеют Θ(1), а не Θ(log n).',repair_level='slide',evidence={'checkpoint_id':'set-complexity'}))
+    return findings
+
+
+# Backward-compatible name used by older jobs and imports.  It now preserves
+# model authorship instead of replacing the complete plan.
+def restructure_known_curriculum(plan: PresentationPlan,content: ContentIR) -> PresentationPlan:
+    return apply_curriculum_guardrails(plan,content)

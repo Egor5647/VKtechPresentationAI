@@ -172,7 +172,8 @@ class SlideLogicContract(Contract):
 
 class LogicFinding(Contract):
     rule: Literal[
-        "L01", "L02", "L03", "L04", "L05", "L06", "L07", "L08", "L09", "L10"
+        "L01", "L02", "L03", "L04", "L05", "L06", "L07", "L08", "L09", "L10",
+        "L11", "L12"
     ]
     severity: Literal["error", "warning", "info"] = "warning"
     slide_id: str | None = None
@@ -200,7 +201,11 @@ class ContentIR(Contract):
 class PlanSlide(Contract):
     id: str
     title: str = Field(min_length=1, max_length=100)
-    message: str = Field(min_length=1, max_length=360)
+    # The API schema advertises much tighter authoring limits.  These wider
+    # transport limits let us accept a provider response that ignored those
+    # hints and then reduce it through fit_semantic_variants, which composes
+    # whole sentences instead of clipping characters.
+    message: str = Field(min_length=1, max_length=1000)
     claim_ids: list[str]
     dataset_id: str | None = None
     asset_id: str | None = None
@@ -208,8 +213,8 @@ class PlanSlide(Contract):
     role: Literal["cover", "content", "divider"] = "content"
     archetype: Literal["cover", "divider", "explanation", "comparison", "process", "example", "formula", "exercise", "summary", "illustration"] = "explanation"
     support_points: list[str] = Field(default_factory=list, max_length=3)
-    takeaway: str = Field(default="", max_length=180)
-    balanced_message: str = Field(default="", max_length=240)
+    takeaway: str = Field(default="", max_length=400)
+    balanced_message: str = Field(default="", max_length=600)
     visual_items: list[str] = Field(default_factory=list, max_length=3)
     visual_brief: str = Field(default="", max_length=300)
     visual_strategy: Literal["none", "generated_image", "source_image", "diagram", "chart", "table"] = "none"
@@ -384,10 +389,10 @@ class ImageSelection(Contract):
 
 class SlideRevision(Contract):
     title: str = Field(min_length=1, max_length=100)
-    message: str = Field(min_length=1, max_length=360)
+    message: str = Field(min_length=1, max_length=1000)
     support_points: list[str] = Field(default_factory=list, max_length=3)
-    takeaway: str = Field(default="", max_length=180)
-    balanced_message: str = Field(default="", max_length=240)
+    takeaway: str = Field(default="", max_length=400)
+    balanced_message: str = Field(default="", max_length=600)
     visual_items: list[str] = Field(default_factory=list, max_length=3)
     visual: Literal["none", "sequence", "list", "hierarchy"] = "none"
     archetype: Literal["divider", "explanation", "comparison", "process", "example", "formula", "exercise", "summary", "illustration"] = "explanation"

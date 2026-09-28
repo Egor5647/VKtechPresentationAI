@@ -241,7 +241,7 @@ def fit_titles(plan: PresentationPlan) -> PresentationPlan:
     return result
 
 
-def planning_claims(content: ContentIR, brief: str) -> list:
+def planning_claims(content: ContentIR, brief: str,slide_count: int=12) -> list:
     """Bound model context while retaining every explicitly mandatory claim."""
     limit=max(1,int(os.environ.get('MODEL_MAX_PLANNING_CLAIMS','32')))
     char_limit=max(1000,int(os.environ.get('MODEL_MAX_PLANNING_CHARS','18000')))
@@ -257,6 +257,18 @@ def planning_claims(content: ContentIR, brief: str) -> list:
         words=set(re.findall(r'[\w+#<>]{3,}',claim.text.lower()))
         return (-len(words&terms),len(claim.text),claim.source,claim.id)
     selected=list(required);used={claim.id for claim in selected};chars=required_chars
+    # Curriculum checkpoints reserve their source fragments before generic
+    # relevance ranking.  This keeps mandatory facts in the model context
+    # without prescribing slide titles, order or wording.
+    from .logic import curriculum_checkpoints
+    checkpoint_ids=[]
+    for checkpoint in curriculum_checkpoints(content,slide_count):
+        checkpoint_ids.extend(checkpoint['claim_ids'])
+    by_id={claim.id:claim for claim in content.claims}
+    for claim_id in dict.fromkeys(checkpoint_ids):
+        claim=by_id.get(claim_id)
+        if not claim or claim.id in used or len(selected)>=limit or chars+len(claim.text)>char_limit:continue
+        selected.append(claim);used.add(claim.id);chars+=len(claim.text)
     for claim in sorted((c for c in content.claims if c.id not in used),key=rank):
         if len(selected)>=limit:break
         if chars+len(claim.text)>char_limit:continue
@@ -422,7 +434,7 @@ def enrich_plan(plan: PresentationPlan,content: ContentIR) -> PresentationPlan:
     return result
 
 
-def validate_plan(plan: PresentationPlan, content: ContentIR, count: int):
+def validate_plan(plan: PresentationPlan, content: ContentIR, count: int,validate_density: bool=True):
     if plan.status=='needs_input': raise NeedsInput(plan.reason)
     if len(plan.slides)!=count: raise ValueError('Model did not preserve requested slide count')
     if len({s.id for s in plan.slides})!=count: raise ValueError('Duplicate slide IDs')
@@ -450,7 +462,7 @@ def validate_plan(plan: PresentationPlan, content: ContentIR, count: int):
             raise ValueError('Plan contains near-duplicate main ideas: '+slide.title)
         titles.add(normalized_title);messages.add(normalized_message)
         authored_messages.append(slide.message)
-        if slide.balanced_message:
+        if validate_density and slide.balanced_message:
             versions={_phrase_key(slide.takeaway),_phrase_key(slide.balanced_message),_phrase_key(slide.message)}-{''}
             if len(versions)<3:raise ValueError('Density modes repeat the same text on slide: '+slide.title)
             if not len(slide.takeaway)<len(slide.balanced_message)<len(slide.message):
@@ -519,7 +531,7 @@ def plan_with_model(gateway,content,request):
     catalog_limit=max(limit,max(0,int(os.environ.get('MODEL_MAX_PLANNING_ASSETS','8'))))
     catalog=sorted(candidates,key=lambda item:(not item[2],-item[1],item[3].id))[:catalog_limit]
     planning_content=content.model_copy(deep=True)
-    selected_claims=planning_claims(content,request.brief)
+    selected_claims=planning_claims(content,request.brief,request.slide_count)
     selected_ids={claim.id for claim in selected_claims}
     # Source order gives the planner a stable narrative spine. Ranking is used
     # only to choose what fits in the bounded context.
@@ -527,7 +539,9 @@ def plan_with_model(gateway,content,request):
     planning_assets={item[3].id:item[3] for item in catalog+selected}
     planning_content.assets=list(planning_assets.values())
     required=[c.id for c in content.claims if c.required]
-    payload={'content':planning_content.model_dump(),'brief':request.brief,'purpose':request.purpose,'slide_count':request.slide_count,'required_claim_ids':required,'source_image_order':[item[3].id for item in selected]}
+    from .logic import curriculum_checkpoints
+    checkpoints=curriculum_checkpoints(content,request.slide_count)
+    payload={'content':planning_content.model_dump(),'brief':request.brief,'purpose':request.purpose,'slide_count':request.slide_count,'required_claim_ids':required,'curriculum_checkpoints':checkpoints,'source_image_order':[item[3].id for item in selected]}
     with tempfile.TemporaryDirectory(prefix='vktech-source-') as temp:
         model_images=[]
         if selected:
@@ -606,13 +620,19 @@ def plan_with_model(gateway,content,request):
                 first=len(combined);last=first+batch_count
                 if claim_groups:
                     groups=claim_groups[first:last];batch_claims=[claim for group in groups for claim in group]
-                    assignments=[{'position':first+local+1,'claim_ids':[claim.id for claim in group],'focus_terms':_focus_terms(group,claims)} for local,group in enumerate(groups)]
+                    assignments=[]
+                    for local,group in enumerate(groups):
+                        group_ids={claim.id for claim in group}
+                        assignments.append({'position':first+local+1,'claim_ids':[claim.id for claim in group],'focus_terms':_focus_terms(group,claims),
+                            'checkpoint_ids':[checkpoint['id'] for checkpoint in checkpoints if group_ids.intersection(checkpoint['claim_ids'])]})
                 else:
                     start=len(claims)*index//batch_total;end=len(claims)*(index+1)//batch_total
                     batch_claims=claims[start:end];assignments=[]
                 batch_content=planning_content.model_copy(deep=True);batch_content.claims=batch_claims
                 batch_required=[claim.id for claim in batch_content.claims if claim.required]
+                checkpoint_ids={item for assignment in assignments for item in assignment.get('checkpoint_ids',[])}
                 batch_payload={**payload,'content':batch_content.model_dump(),'slide_count':batch_count,'required_claim_ids':batch_required,
+                    'curriculum_checkpoints':[checkpoint for checkpoint in checkpoints if checkpoint['id'] in checkpoint_ids],
                     'plan_segment':{'index':index+1,'total':batch_total,'first_position':first+1,'last_position':last,'existing_titles':existing_titles},
                     'slide_assignments':assignments}
                 batch=request_plan(batch_payload,batch_content,batch_count,existing_titles,existing_messages,assignments)
