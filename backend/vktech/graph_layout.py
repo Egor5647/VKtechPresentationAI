@@ -285,6 +285,7 @@ def _short_concept(value: str,max_words=4) -> str:
         (r'копировани\w*','Копирование'),
         (r'nested\s+parallel\s+loops?|nested\s+loops?','Глубины складываются'),
         (r'ошибк\w*.*перемнож','Глубины не умножают'),
+        (r'ассоциативн\w*.*корректн\w*.*группиров','Ассоциативная группировка'),
     )
     for pattern,label in replacements:
         if re.search(pattern,value,re.I):return label

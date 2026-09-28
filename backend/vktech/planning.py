@@ -346,6 +346,9 @@ def assign_visual_strategies(plan: PresentationPlan,content: ContentIR,allow_gen
             slide.visual_reason='Переход между двумя представлениями точнее показывает редактируемая схема.';continue
         if slide.role in {'cover','divider'} or index in {0,last}:
             slide.visual='none';slide.visual_strategy='none';slide.visual_score=.95;slide.visual_reason='Оформление шаблона уже выполняет визуальную функцию этого слайда.';continue
+        if slide.visual_strategy=='diagram' and slide.visual_reason.startswith('Кандидаты иллюстрации отклонены'):
+            slide.asset_id=None;slide.visual_score=.9
+            continue
         if illustration:
             concept,score=illustration
             slide.visual='image' if generated_asset else 'none';slide.visual_strategy='generated_image';slide.visual_score=score
@@ -837,6 +840,7 @@ def _semantic_lead(slide,variant):
 def _diagram_items(ps,claims):
     def label(value):
         value=_clean_text(value).rstrip(' .;:')
+        if re.search(r'ассоциативн\w*.*корректн\w*.*группиров',value,re.I):return 'Ассоциативная группировка'
         if len(value)<=52:return value
         parts=[_clean_text(part).rstrip(' .;:') for part in re.split(r'[:;,.]|\s+[—–]\s+',value)]
         candidate=next((part for part in parts if 12<=len(part)<=52),None)

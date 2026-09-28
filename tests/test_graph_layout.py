@@ -101,6 +101,15 @@ def test_sequence_fallback_never_leaves_an_unclosed_formula_label():
     assert all(node.label.count('(')==node.label.count(')') for node in spec.nodes)
 
 
+def test_fallback_graph_does_not_leave_a_dangling_adjective():
+    spec=default_diagram('sequence',[
+        'Число значений уменьшается вдвое',
+        'Геометрическая сумма даёт Θ(n)',
+        'Ассоциативность операции важна для корректной группировки',
+    ])
+    assert any(node.label=='Ассоциативная группировка' for node in spec.nodes)
+
+
 def test_rendered_math_uses_typographic_subscripts():
     assert _math_display('T_P ≥ W/P; T_level ≤ 2T*')=='Tₚ ≥ W/P; Tₗₑᵥₑₗ ≤ 2T*'
 

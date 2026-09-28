@@ -4,7 +4,7 @@ import pytest
 from pptx import Presentation
 from PIL import Image
 from vktech.template import import_template
-from vktech.planning import NeedsInput,build_scenes,validate_plan,plan_with_model,normalize_plan,planning_claims,enrich_plan,fit_semantic_variants,assign_visual_strategies,protect_text_from_template_decor,_diagram_layout
+from vktech.planning import NeedsInput,build_scenes,validate_plan,plan_with_model,normalize_plan,planning_claims,enrich_plan,fit_semantic_variants,assign_visual_strategies,protect_text_from_template_decor,_diagram_layout,_diagram_items
 from vktech.export import export_pptx,export_html,_card_font_size
 from vktech.opc import Package
 from vktech.audit import audit_scene,audit_rendered_deck,repair_scene,contrast
@@ -245,6 +245,22 @@ def test_visual_strategy_keeps_exact_scheduler_bounds_editable(content,plan):
     target.visual='sequence'
     selected=assign_visual_strategies(draft,content,True).slides[4]
     assert selected.visual_strategy=='diagram'
+
+
+def test_visual_strategy_preserves_reviewed_image_fallback(content,plan):
+    draft=plan.model_copy(deep=True);target=draft.slides[4]
+    target.title='Пределы полезного параллелизма в production'
+    target.message='Реальные bottleneck включают bandwidth, cache, NUMA, locks и oversubscription.'
+    target.visual='hierarchy';target.visual_strategy='diagram'
+    target.visual_reason='Кандидаты иллюстрации отклонены автоматической проверкой; использована редактируемая схема.'
+    selected=assign_visual_strategies(draft,content,True).slides[4]
+    assert selected.visual_strategy=='diagram' and selected.asset_id is None
+
+
+def test_diagram_item_compacts_associativity_as_a_complete_phrase(plan):
+    slide=plan.slides[4].model_copy(deep=True)
+    slide.visual_items=['Ассоциативность операции важна для корректной группировки']
+    assert _diagram_items(slide,{})==['Ассоциативная группировка']
 
 
 def test_image_candidates_are_scored_and_best_is_selected(content,plan,monkeypatch):
