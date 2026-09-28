@@ -5,6 +5,7 @@ from lxml import etree as E
 from vktech.template import import_template
 from vktech.opc import Package,NS,serialize,relpath
 from vktech.planning import usable_prototypes, NeedsInput
+from vktech.contracts import Box,DesignIR,Prototype,Slot,Style
 
 
 def test_import_and_relationships(template_bytes):
@@ -69,3 +70,21 @@ def test_zero_height_title_is_still_rejected(empty_placeholder_template):
     design=import_template(empty_placeholder_template)
     next(s for s in design.prototypes[0].slots if s.role=='title').box.h=0
     with pytest.raises(NeedsInput):usable_prototypes(design)
+
+
+def test_usable_prototypes_deprioritizes_narrow_split_layouts():
+    design=DesignIR(
+        id='design',source_hash='hash',width=12192000,height=6858000,
+        fonts=['Arial'],font_sizes=[18,32],palette=['FFFFFF','000000'],
+        prototypes=[
+            Prototype(id='split',slide_part='split.xml',layout_part='layout.xml',background='FFFFFF',slots=[
+                Slot(id='split-title',shape_id=1,role='title',box=Box(x=.05,y=.08,w=.30,h=.14),style=Style(font='Arial',size=32)),
+                Slot(id='split-body',shape_id=2,role='body',box=Box(x=.05,y=.30,w=.34,h=.50),style=Style(font='Arial',size=18)),
+            ]),
+            Prototype(id='wide',slide_part='wide.xml',layout_part='layout.xml',background='FFFFFF',slots=[
+                Slot(id='wide-title',shape_id=3,role='title',box=Box(x=.05,y=.08,w=.88,h=.14),style=Style(font='Arial',size=32)),
+                Slot(id='wide-body',shape_id=4,role='body',box=Box(x=.05,y=.30,w=.42,h=.50),style=Style(font='Arial',size=18)),
+            ]),
+        ],
+    )
+    assert [prototype.id for prototype in usable_prototypes(design)][:2]==['wide','split']

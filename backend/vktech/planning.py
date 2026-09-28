@@ -671,6 +671,11 @@ def usable_prototypes(design):
             if visual_area>.04 or central_decor>.04:score-=1
             score+=.18 if len(bodies)<=2 else 0
             score+=.12 if min(s.style.size for s in bodies)>=16 else 0
+            # A narrow title usually belongs to a split layout whose right
+            # half contains an inherited photo or another authored visual.
+            # The generic composer uses the slide as a full-width canvas, so
+            # rank these layouts behind ordinary wide-title content slides.
+            score-=.6 if title.box.w<.4 else 0
             score-=.8 if instruction.search(' '.join(s.source_text[:180] for s in p.slots if s.role=='title')) else 0
             score-=.02*len(bodies)
             score-=1 if any(re.search(r'\bpadding\b|\bmargin\b|\bbody\s*\{',s.source_text) for s in bodies) else 0
