@@ -1,2 +1,0 @@
-# Isolated Apple Silicon inference environment. Keep separate from the API venv.
-mlx-vlm==0.7.1
