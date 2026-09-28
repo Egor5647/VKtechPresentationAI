@@ -1,0 +1,15 @@
+.git
+.env
+.env.*
+.venv
+.mlx-venv*
+.tools
+.local
+.pytest_cache
+**/__pycache__
+**/*.egg-info
+frontend/node_modules
+frontend/dist
+data
+output
+tmp

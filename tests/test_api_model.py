@@ -1,20 +1,22 @@
 import json
-import base64
-import io
 import pytest
 import httpx
-from PIL import Image
 from fastapi.testclient import TestClient
 from vktech.api import app,store
 from vktech.store import Store
-from vktech.model import ModelGateway,validate_manifest,configured_text_model
+from vktech.model import ModelGateway,validate_manifest,model_endpoint,ModelUnavailable
 from vktech.contracts import PresentationPlan
 
 
 def test_api_upload_job_and_artifact_access(template_bytes,content,tmp_path,monkeypatch):
-    monkeypatch.setenv('DATA_DIR',str(tmp_path/'data'));monkeypatch.setenv('DATABASE_URL','sqlite:///'+str(tmp_path/'db.sqlite'));monkeypatch.setenv('AI_PROVIDER','polza');monkeypatch.setenv('MODEL_MODE','quality');store.cache_clear()
+    monkeypatch.setenv('DATA_DIR',str(tmp_path/'data'));monkeypatch.setenv('DATABASE_URL','sqlite:///'+str(tmp_path/'db.sqlite'));monkeypatch.delenv('POLZA_API_KEY',raising=False);monkeypatch.delenv('MODEL_API_KEY',raising=False);monkeypatch.delenv('T2I_API_KEY',raising=False);store.cache_clear()
     with TestClient(app) as client:
-        health=client.get('/api/health').json();assert health['model_mode']=='quality';assert health['provider']=='polza';assert health['model_name']=='qwen/qwen3.8-27b'
+        health=client.get('/api/health').json();assert health['model_mode']=='api';assert health['model_name']=='qwen/qwen3.8-27b'
+        assert not health['model_configured'] and not health['image_model_configured']
+        monkeypatch.setenv('POLZA_API_KEY','test-polza-key')
+        health=client.get('/api/health').json()
+        assert health['model_configured'] and health['image_model_configured']
+        assert 'test-polza-key' not in json.dumps(health)
         tr=client.post('/api/templates',files={'file':('unknown.pptx',template_bytes)});assert tr.status_code==200,tr.text
         cr=client.post('/api/content',files={'file':('content.json',content.model_dump_json().encode())});assert cr.status_code==200,cr.text
         jr=client.post('/api/jobs',json={'template_id':tr.json()['id'],'content_id':cr.json()['id'],'brief':'Explain sources'});assert jr.status_code==202
@@ -29,19 +31,23 @@ def test_api_upload_job_and_artifact_access(template_bytes,content,tmp_path,monk
 
 
 def test_gateway_schema_retry_and_polza_provider(plan,monkeypatch):
-    monkeypatch.setenv('AI_PROVIDER','polza');monkeypatch.setenv('MODEL_MODE','fast');monkeypatch.setenv('POLZA_BASE_URL','https://polza.example/api/v1');monkeypatch.setenv('POLZA_API_KEY','test-secret')
+    monkeypatch.setenv('POLZA_API_KEY','test-polza-key')
+    monkeypatch.setenv('MODEL_RESPONSE_FORMAT','json_schema')
     calls=[]
     def handle(request):
         calls.append(request)
         return httpx.Response(200,json={'choices':[{'message':{'content':'{}' if len(calls)==1 else plan.model_dump_json()}}]})
     gateway=ModelGateway(httpx.Client(transport=httpx.MockTransport(handle)))
+    gateway.cache_enabled=False
     result=gateway.structured('planning',{'brief':'test','slide_count':12},PresentationPlan)
     assert len(result.slides)==12 and len(calls)==2
     assert all(c['provider']=='polza' for c in gateway.calls)
-    assert all(str(c.url)=='https://polza.example/api/v1/chat/completions' for c in calls)
-    assert all(c.headers['Authorization']=='Bearer test-secret' for c in calls)
+    assert all(str(c.url)=='https://polza.ai/api/v1/chat/completions' for c in calls)
+    assert all(c.headers['Authorization']=='Bearer test-polza-key' for c in calls)
     body=json.loads(calls[-1].content)
     assert body['response_format']['type']=='json_schema'
+    assert body['model']=='qwen/qwen3.8-27b'
+    assert body['reasoning']=={'enabled':False}
     assert body['response_format']['json_schema']['schema']['title']=='PresentationPlan'
     assert body['response_format']['json_schema']['schema']['properties']['slides']['minItems']==12
     assert body['response_format']['json_schema']['schema']['properties']['slides']['maxItems']==12
@@ -52,56 +58,18 @@ def test_gateway_schema_retry_and_polza_provider(plan,monkeypatch):
     with pytest.raises(ValueError):validate_manifest({'text':{'parameters':36_000_000_000,'license':'Apache-2.0','open_weights':True}})
 
 
-def test_model_modes(monkeypatch):
-    monkeypatch.setenv('AI_PROVIDER','polza');monkeypatch.setenv('POLZA_API_KEY','test-secret')
-    monkeypatch.delenv('POLZA_TEXT_MODEL',raising=False)
-    monkeypatch.setenv('MODEL_MODE','quality')
-    quality=ModelGateway(httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(500))))
-    assert quality.model=='qwen/qwen3.8-27b'
-    assert quality.model_config['parameters']==13_945_032_240
-    assert quality.model_config['api_parameters']==27_000_000_000
-    monkeypatch.setenv('MODEL_MODE','fast')
-    fast=ModelGateway(httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(500))))
-    assert fast.model=='qwen/qwen3-vl-8b-instruct'
-    assert configured_text_model(fast.manifest,'fast')['parameters']==4_437_815_808
-    assert configured_text_model(fast.manifest,'fast')['api_parameters']==8_000_000_000
-    monkeypatch.setenv('MODEL_MODE','unknown')
-    with pytest.raises(ValueError,match='Invalid MODEL_MODE'):
-        ModelGateway(httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(500))))
-
-
-def test_polza_falls_back_to_json_object(plan,monkeypatch):
-    monkeypatch.setenv('AI_PROVIDER','polza');monkeypatch.setenv('POLZA_API_KEY','test-secret');monkeypatch.setenv('POLZA_RETRY_DELAY_SECONDS','0')
-    bodies=[]
-    def handle(request):
-        body=json.loads(request.content);bodies.append(body)
-        if len(bodies)==1:return httpx.Response(400,json={'error':'json_schema unsupported'})
-        return httpx.Response(200,json={'choices':[{'message':{'content':'```json\n'+plan.model_dump_json()+'\n```'}}]})
-    result=ModelGateway(httpx.Client(transport=httpx.MockTransport(handle))).structured('planning',{'slide_count':12},PresentationPlan)
-    assert len(result.slides)==12
-    assert [body['response_format']['type'] for body in bodies]==['json_schema','json_object']
-
-
-def test_polza_pending_image_download(monkeypatch,tmp_path):
-    monkeypatch.setenv('AI_PROVIDER','polza');monkeypatch.setenv('POLZA_API_KEY','test-secret');monkeypatch.setenv('T2I_POLL_INTERVAL_SECONDS','0')
-    buffer=io.BytesIO();Image.new('RGB',(16,9),'#2277cc').save(buffer,'PNG');encoded=base64.b64encode(buffer.getvalue()).decode()
-    calls=[]
-    def handle(request):
-        calls.append((request.method,str(request.url)))
-        if request.method=='POST':return httpx.Response(200,json={'id':'gen_123','status':'pending'})
-        return httpx.Response(200,json={'status':'completed','data':[{'b64_json':encoded}]})
-    gateway=ModelGateway(httpx.Client(transport=httpx.MockTransport(handle)));output=tmp_path/'image.png'
-    gateway.image('A restrained technical illustration',output)
-    assert output.read_bytes().startswith(b'\x89PNG')
-    assert calls==[('POST','https://polza.ai/api/v2/images/generations'),('GET','https://polza.ai/api/v1/media/gen_123')]
-    assert gateway.calls[-1]['provider']=='polza' and gateway.calls[-1]['model']=='qwen/image-2'
-
-
-def test_polza_errors_do_not_expose_key(monkeypatch):
-    secret='do-not-print-this';monkeypatch.setenv('AI_PROVIDER','polza');monkeypatch.setenv('POLZA_API_KEY',secret);monkeypatch.setenv('POLZA_RETRY_ATTEMPTS','1')
-    gateway=ModelGateway(httpx.Client(transport=httpx.MockTransport(lambda _:httpx.Response(401,json={'error':secret}))))
-    with pytest.raises(Exception) as caught:gateway.structured('planning',{'slide_count':1},PresentationPlan)
-    assert secret not in str(caught.value)
+def test_remote_model_configuration(monkeypatch):
+    monkeypatch.setenv('POLZA_API_KEY','test-polza-key')
+    monkeypatch.setenv('MODEL_NAME','qwen3.8-27b')
+    endpoint=model_endpoint()
+    assert endpoint.model=='qwen/qwen3.8-27b' and endpoint.configured
+    assert 'test-polza-key' not in repr(endpoint)
+    monkeypatch.setenv('MODEL_BASE_URL','https://custom.example/v1')
+    assert not model_endpoint().configured
+    monkeypatch.setenv('MODEL_API_KEY','custom-key')
+    assert model_endpoint().key=='custom-key'
+    monkeypatch.setenv('MODEL_NAME','other-model')
+    with pytest.raises(ValueError,match='MODEL_NAME'):model_endpoint()
 
 
 @pytest.mark.skipif(not __import__('os').environ.get('TEST_DATABASE_URL'),reason='PostgreSQL test database not configured')

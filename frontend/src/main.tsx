@@ -123,7 +123,7 @@ function App(){
         <div className="row"><label>Назначение<select value={purpose} onChange={e=>setPurpose(e.target.value)}><option value="project">Проект</option><option value="product">Продукт</option><option value="feature">Новая функция</option><option value="initiative">Инициатива</option></select></label><label>Слайды<input type="number" min={1} max={50} value={count} onChange={e=>setCount(Number(e.target.value))}/></label></div>
         <label className="checkbox"><input type="checkbox" checked={images} disabled={!health?.image_model_configured} onChange={e=>setImages(e.target.checked)}/>Создать иллюстрации</label>
         <button className="primary" onClick={start} disabled={busy||!template||!content||!brief.trim()||['queued','running'].includes(job?.state||'')}>Создать презентацию</button>
-        {health&&!health.model_configured&&<p className="notice">Для генерации нужно запустить текстовую модель.</p>}{health&&!health.image_model_configured&&<p className="notice">Генератор новых иллюстраций сейчас недоступен.</p>}{health&&!health.renderer_available&&<p className="notice">Для PDF и превью нужен LibreOffice.</p>}
+        {health&&!health.model_configured&&<p className="notice">Для генерации нужно настроить API-ключ на сервере.</p>}{health&&!health.image_model_configured&&<p className="notice">Генератор новых иллюстраций сейчас недоступен.</p>}{health&&!health.renderer_available&&<p className="notice">Для PDF и превью нужен LibreOffice.</p>}
         {job?.state==='ready'&&presentation&&<section className="palette-panel">
           <div className="palette-title"><b>Цветовая гамма</b><span className={paletteDirty?'changed':''}>{paletteDirty?'Изменена':'Применена'}</span></div>
           <div className="palette-presets">

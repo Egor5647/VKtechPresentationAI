@@ -4,6 +4,7 @@ import pytest
 from lxml import etree as E
 from vktech.template import import_template
 from vktech.opc import Package,NS,serialize,relpath
+from vktech.planning import usable_prototypes, NeedsInput
 
 
 def test_import_and_relationships(template_bytes):
@@ -35,3 +36,36 @@ def test_group_transform(template_bytes):
     d=import_template(pkg.bytes());slot=next(s for s in d.prototypes[0].slots if s.source_text=='Текст шаблона')
     assert slot.box.x==pytest.approx(.2)
     assert slot.box.w==pytest.approx(1.76)
+
+
+@pytest.mark.parametrize('kind', [None, 'obj', 'body', 'subTitle'])
+def test_empty_text_placeholders_are_usable_with_inherited_style(empty_placeholder_template, kind):
+    pkg=Package(empty_placeholder_template);part=pkg.slides()[0];root=pkg.root(part)
+    body=next(s for s in root.findall('.//p:sp',NS) if s.find('.//p:ph',NS).get('idx')=='1')
+    ph=body.find('.//p:ph',NS)
+    if kind is None:ph.attrib.pop('type',None)
+    else:ph.set('type',kind)
+    pkg.parts[part]=serialize(root)
+    design=import_template(pkg.bytes());proto=usable_prototypes(design)[0]
+    title=next(s for s in proto.slots if s.role=='title')
+    body=next(s for s in proto.slots if s.role=='body')
+    assert not title.source_text and not body.source_text
+    assert title.box.h<.06 and title.style.size==20
+    assert body.box.w>.5 and body.box.h>.4 and body.style.size==18
+    assert 'DejaVu Sans' in design.fonts
+    assert {18,20}<=set(design.font_sizes)
+
+
+def test_empty_picture_placeholder_is_not_a_text_body(empty_placeholder_template):
+    pkg=Package(empty_placeholder_template);part=pkg.slides()[0];root=pkg.root(part)
+    body=next(s for s in root.findall('.//p:sp',NS) if s.find('.//p:ph',NS).get('idx')=='1')
+    body.find('.//p:ph',NS).set('type','pic');pkg.parts[part]=serialize(root)
+    design=import_template(pkg.bytes())
+    assert not any(s.role=='body' for s in design.prototypes[0].slots)
+    with pytest.raises(NeedsInput):usable_prototypes(design)
+
+
+def test_zero_height_title_is_still_rejected(empty_placeholder_template):
+    design=import_template(empty_placeholder_template)
+    next(s for s in design.prototypes[0].slots if s.role=='title').box.h=0
+    with pytest.raises(NeedsInput):usable_prototypes(design)

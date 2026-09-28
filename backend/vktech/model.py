@@ -1,20 +1,52 @@
-"""Inference gateway for Polza.ai with an explicit local compatibility mode."""
+"""Remote model APIs: structured text/vision through Polza, no local inference."""
 from __future__ import annotations
 import base64
 import copy
 import hashlib
 import io
 import json
+import logging
 import os
+import re
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from .settings import ROOT, artifact_path, config
 
 
 class ModelUnavailable(RuntimeError):
     pass
+
+
+log = logging.getLogger(__name__)
+
+
+def validation_issues(error: ValidationError, output_schema: dict) -> list[dict]:
+    """Describe schema failures without logging source text or arbitrary JSON keys."""
+    fields = set()
+    def collect(value):
+        if isinstance(value, dict):
+            fields.update(value.get('properties', {}))
+            for child in value.values():
+                collect(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect(child)
+    collect(output_schema)
+    issues = []
+    for item in error.errors(include_input=False, include_context=False, include_url=False)[:12]:
+        path = ''
+        for part in item['loc']:
+            if isinstance(part, int):
+                path += f'[{part}]'
+            else:
+                name = part if part in fields else '<unknown_field>'
+                path += ('.' if path else '') + name
+        issues.append({'path': path or '$', 'type': item['type'], 'message': item['msg'][:400]})
+    return issues
 
 
 def encoded_image(path: Path) -> str:
@@ -30,49 +62,47 @@ def encoded_image(path: Path) -> str:
 
 
 def validate_manifest(manifest):
-    candidates = []
-    text = manifest.get("text", {})
-    modes = text.get("modes")
-    if modes:
-        if text.get("default_mode") not in modes:
-            raise ValueError("text.default_mode must identify a configured mode")
-        candidates.extend((f"text.{name}", model, 35_000_000_000) for name, model in modes.items())
-    elif text:
-        candidates.append(("text", text, 35_000_000_000))
-    if manifest.get("image"):
-        candidates.append(("image", manifest["image"], 20_000_000_000))
-    for role, model, limit in candidates:
-        if not model.get("open_weights") or model.get("license") not in {"Apache-2.0","MIT"} or not 0 < model.get("parameters",0) <= limit:
-            raise ValueError(f"Ineligible model configuration: {role}")
-        if model.get('api_model') and not 0 < model.get('api_parameters',model['parameters']) <= limit:
-            raise ValueError(f"Ineligible API model configuration: {role}")
+    for role in ('text', 'image'):
+        model = manifest.get(role, {})
+        if not model.get('model') or not model.get('base_url') or not model.get('provider'):
+            raise ValueError(f'Missing API model configuration: {role}')
 
 
-def configured_text_model(manifest, mode: str):
-    text = manifest["text"]
-    modes = text.get("modes") or {"default": text}
-    if mode not in modes:
-        raise ValueError(f"Invalid MODEL_MODE: {mode}")
-    return modes[mode]
+@dataclass(frozen=True)
+class Endpoint:
+    url: str
+    model: str
+    provider: str
+    key: str = field(repr=False)
+
+    @property
+    def configured(self):
+        return bool(self.url and self.key)
 
 
-def inference_status() -> dict:
-    """Return public configuration state without exposing any credential."""
-    manifest=config('models.yaml');provider=os.environ.get('AI_PROVIDER','polza').lower()
-    mode=os.environ.get('MODEL_MODE',manifest['text']['default_mode']);selected=configured_text_model(manifest,mode)
-    if provider=='polza':
-        model=os.environ.get('POLZA_TEXT_MODEL_'+mode.upper()) or os.environ.get('POLZA_TEXT_MODEL') or selected['api_model']
-        configured=bool(os.environ.get('POLZA_API_KEY'))
-        image_model=os.environ.get('POLZA_IMAGE_MODEL') or manifest['image']['api_model']
-        image_configured=configured
-    elif provider=='local':
-        final=os.environ.get('MODEL_PROFILE')=='final'
-        model=os.environ.get('VK_MODEL_NAME' if final else 'MODEL_NAME') or selected['repository']
-        configured=bool(os.environ.get('VK_BASE_URL' if final else 'MODEL_BASE_URL'))
-        image_model=os.environ.get('T2I_MODEL') or manifest['image']['repository']
-        image_configured=bool(os.environ.get('T2I_BASE_URL'))
-    else:raise ValueError('AI_PROVIDER must be polza or local')
-    return {'provider':provider,'mode':mode,'model':model,'model_configured':configured,'image_model':image_model,'image_model_configured':image_configured}
+def model_endpoint(kind='text', manifest=None):
+    manifest = manifest or config('models.yaml')
+    validate_manifest(manifest)
+    selected = manifest[kind]
+    prefix = 'MODEL' if kind == 'text' else 'T2I'
+    url = os.environ.get(prefix + '_BASE_URL', selected['base_url']).strip().rstrip('/')
+    parsed = urlsplit(url)
+    if url and (parsed.scheme not in {'http', 'https'} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment):
+        raise ValueError(f'{prefix}_BASE_URL must be an API base URL without credentials or query parameters')
+    is_polza = parsed.hostname == 'polza.ai'
+    if is_polza and parsed.scheme != 'https':
+        raise ValueError('Polza API requires HTTPS')
+    name_var = 'MODEL_NAME' if kind == 'text' else 'T2I_MODEL'
+    model = os.environ.get(name_var, '').strip() or selected['model']
+    if model in selected.get('aliases', []):
+        model = selected['model']
+    if kind == 'text' and model != selected['model']:
+        raise ValueError('MODEL_NAME must identify the model in config/models.yaml')
+    # A Polza key is never implicitly sent to a custom endpoint.
+    key = os.environ.get(prefix + '_API_KEY', '').strip()
+    if not key and is_polza:
+        key = os.environ.get('POLZA_API_KEY', '').strip()
+    return Endpoint(url, model, 'polza' if is_polza else 'configured_endpoint', key)
 
 
 def response_schema(role: str, payload: dict, schema: type[BaseModel]) -> dict:
@@ -119,187 +149,210 @@ def response_schema(role: str, payload: dict, schema: type[BaseModel]) -> dict:
 
 class ModelGateway:
     def __init__(self, client=None):
-        self.provider = os.environ.get("AI_PROVIDER", "polza").lower()
-        if self.provider not in {"polza", "local"}:
-            raise ValueError("AI_PROVIDER must be polza or local")
-        self.profile = os.environ.get("MODEL_PROFILE", "selection")
-        if self.profile not in {"selection", "final"}: raise ValueError("Invalid MODEL_PROFILE")
         self.manifest = config("models.yaml"); validate_manifest(self.manifest)
-        text = self.manifest["text"]
-        self.mode = os.environ.get("MODEL_MODE", text.get("default_mode", "default"))
-        self.model_config = configured_text_model(self.manifest, self.mode)
-        if self.provider == "polza":
-            self.url = os.environ.get("POLZA_BASE_URL", "https://polza.ai/api/v1").rstrip("/")
-            self.key = os.environ.get("POLZA_API_KEY", "")
-            mode_key = "POLZA_TEXT_MODEL_" + self.mode.upper()
-            self.model = os.environ.get(mode_key) or os.environ.get("POLZA_TEXT_MODEL") or self.model_config["api_model"]
-        else:
-            final = self.profile == "final"
-            self.url = os.environ.get("VK_BASE_URL" if final else "MODEL_BASE_URL", "").rstrip("/")
-            self.key = os.environ.get("VK_API_KEY" if final else "MODEL_API_KEY", "")
-            self.model = os.environ.get("VK_MODEL_NAME" if final else "MODEL_NAME") or self.model_config["repository"]
-        approved = {self.model_config["repository"], self.model_config.get("api_model"), *self.model_config.get("aliases", [])}
-        if self.model not in approved: raise ValueError("Configured text model is not approved in config/models.yaml")
+        self.endpoint = model_endpoint('text', self.manifest)
+        self.image_endpoint = model_endpoint('image', self.manifest)
+        self.profile = self.endpoint.provider
+        self.mode = 'api'
+        self.model = self.endpoint.model
+        self.model_config = self.manifest['text']
+        self.response_format = os.environ.get('MODEL_RESPONSE_FORMAT', self.model_config.get('response_format', 'json_object'))
+        if self.response_format not in {'json_object', 'json_schema'}:
+            raise ValueError('MODEL_RESPONSE_FORMAT must be json_object or json_schema')
+        self.reasoning_enabled = os.environ.get('MODEL_REASONING_ENABLED', '0') == '1'
         timeout = float(os.environ.get("MODEL_TIMEOUT_SECONDS", "300"))
-        self.client = client or httpx.Client(timeout=httpx.Timeout(timeout, connect=10))
+        self.client = client or httpx.Client(timeout=httpx.Timeout(timeout, connect=10),
+                                            trust_env=os.environ.get('MODEL_TRUST_ENV', '0') == '1')
         self.cache_enabled=os.environ.get('MODEL_CACHE','1' if client is None else '0')=='1'
         self.calls = []
+
+    def _request(self, method, path, endpoint, role, *, body=None, timeout=None, attempts=3):
+        if not endpoint.configured:
+            raise ModelUnavailable('Настройте POLZA_API_KEY в .env; для другого API укажите его BASE_URL и API_KEY.')
+        for attempt in range(attempts):
+            started = time.monotonic()
+            options = {'headers': {'Authorization': 'Bearer ' + endpoint.key}}
+            if body is not None:
+                options['json'] = body
+            if timeout is not None:
+                options['timeout'] = timeout
+            try:
+                response = self.client.request(method, endpoint.url + path, **options)
+            except httpx.RequestError:
+                # Retrying an ambiguous timeout can duplicate a paid generation.
+                raise ModelUnavailable('API модели недоступен или превышено время ожидания; повторите задание позже.') from None
+            call = {'role': role, 'provider': endpoint.provider, 'mode': 'api', 'model': endpoint.model,
+                    'seconds': round(time.monotonic() - started, 3), 'status_code': response.status_code, 'attempt': attempt + 1}
+            self.calls.append(call)
+            if response.status_code in {429, 500, 502, 503, 504} and attempt + 1 < attempts:
+                try:
+                    delay = min(10, max(0, float(response.headers.get('Retry-After', 2 ** attempt))))
+                except ValueError:
+                    delay = 2 ** attempt
+                time.sleep(delay)
+                continue
+            if response.is_error:
+                message = {401: 'Проверьте API-ключ.', 403: 'Нет доступа к модели.',
+                           402: 'Недостаточно средств на балансе API.', 404: 'Модель или endpoint не найдены.',
+                           429: 'Превышен лимит запросов; повторите позже.'}.get(response.status_code, 'Проверьте настройки API или повторите позже.')
+                # Do not expose provider bodies, headers or credentials to jobs/logs.
+                raise ModelUnavailable(f'API модели: HTTP {response.status_code}. {message}')
+            try:
+                document = response.json()
+                if not isinstance(document, dict):
+                    raise ValueError
+            except ValueError:
+                raise ModelUnavailable('API модели вернул некорректный JSON.') from None
+            usage = document.get('usage')
+            if isinstance(usage, dict):
+                call['usage'] = {k: v for k, v in usage.items() if k in {'prompt_tokens', 'completion_tokens', 'total_tokens', 'cost', 'cost_rub'} and isinstance(v, (int, float))}
+            return document
 
     def _cache_path(self,kind: str,parts: list[bytes],suffix='json'):
         digest=hashlib.sha256(b'\0'.join(parts)).hexdigest()
         return artifact_path(f'cache/{kind}/{digest}.{suffix}')
 
-    def _headers(self):
-        if not self.key:
-            name = "POLZA_API_KEY" if self.provider == "polza" else "model API key"
-            raise ModelUnavailable(f"{name} is not configured")
-        return {"Authorization":"Bearer "+self.key,"Content-Type":"application/json"}
-
-    @staticmethod
-    def _request_error(response: httpx.Response, purpose: str):
-        messages={401:'API key was rejected',402:'Insufficient API balance',403:'API access is forbidden',429:'API rate limit was exceeded'}
-        detail=messages.get(response.status_code,f'HTTP {response.status_code}')
-        return ModelUnavailable(f'{purpose} failed: {detail}')
-
-    def _post(self,url: str,payload: dict,purpose: str,timeout=None):
-        attempts=max(1,int(os.environ.get('POLZA_RETRY_ATTEMPTS','3')))
-        delay=float(os.environ.get('POLZA_RETRY_DELAY_SECONDS','.5'))
-        last=None
-        for attempt in range(attempts):
-            try:
-                kwargs={'headers':self._headers(),'json':payload}
-                if timeout is not None:kwargs['timeout']=timeout
-                response=self.client.post(url,**kwargs)
-            except httpx.HTTPError as exc:
-                last=exc
-                if attempt+1==attempts:break
-                time.sleep(delay*(2**attempt));continue
-            if response.status_code not in {429,500,502,503,504}:
-                return response
-            last=self._request_error(response,purpose)
-            if attempt+1<attempts:time.sleep(delay*(2**attempt))
-        if isinstance(last,ModelUnavailable):raise last
-        raise ModelUnavailable(f'{purpose} failed: network error') from last
-
-    @staticmethod
-    def _message_text(message: dict) -> str:
-        raw=message.get('content','')
-        if isinstance(raw,list):
-            raw=''.join(str(item.get('text') or item.get('content') or '') for item in raw if isinstance(item,dict))
-        if not isinstance(raw,str):raw=json.dumps(raw,ensure_ascii=False)
-        raw=raw.strip()
-        if raw.startswith('```'):
-            raw=raw.split('\n',1)[1] if '\n' in raw else raw[3:]
-            raw=raw.rsplit('```',1)[0].strip()
-        if not raw.startswith('{') and '{' in raw and '}' in raw:
-            raw=raw[raw.find('{'):raw.rfind('}')+1]
-        return raw
-
     def structured(self, role: str, payload: dict, schema: type[BaseModel], images: list[Path] | None = None):
-        if not self.url:
-            raise ModelUnavailable("Text model endpoint is not configured")
+        if not self.endpoint.configured:
+            raise ModelUnavailable('Настройте POLZA_API_KEY в .env. Модель не вызывалась.')
         prompt_name={'planning':'plan.txt','vision_audit':'audit.txt','regenerate_slide':'regenerate_slide.txt','image_selection':'image_selection.txt'}.get(role)
         if not prompt_name:raise ValueError(f'Unsupported structured role: {role}')
         prompt = (ROOT / "prompts" / prompt_name).read_text()
         output_schema = response_schema(role, payload, schema)
-        cache=self._cache_path('structured',[role.encode(),self.model.encode(),prompt.encode(),json.dumps(payload,ensure_ascii=False,sort_keys=True).encode(),json.dumps(output_schema,sort_keys=True).encode(),*[Path(p).read_bytes() for p in images or []]])
+        max_tokens = int(os.environ.get('MODEL_MAX_TOKENS_' + role.upper(), '6500' if role == 'planning' else '3000'))
+        inference = {'reasoning': {'enabled': self.reasoning_enabled}, 'max_tokens': max_tokens, 'temperature': 0.2}
+        cache=self._cache_path('structured',[self.endpoint.url.encode(),role.encode(),self.model.encode(),self.response_format.encode(),json.dumps(inference,sort_keys=True).encode(),os.environ.get('MODEL_IMAGE_MAX_EDGE','896').encode(),prompt.encode(),json.dumps(payload,ensure_ascii=False,sort_keys=True).encode(),json.dumps(output_schema,sort_keys=True).encode(),*[Path(p).read_bytes() for p in images or []]])
         if self.cache_enabled and cache.exists():
             result=schema.model_validate_json(cache.read_bytes())
             self.calls.append({'role':role,'provider':'cache','mode':self.mode,'model':self.model,'seconds':0,'status_code':200,'attempt':0})
             return result
-        # The schema is already supplied through response_format. Repeating it in
-        # the user message wastes thousands of local-model prefill tokens.
+        # Keep a stable JSON protocol even when the upstream strict decoder does
+        # not handle this nested schema. Validation remains mandatory locally.
+        if self.response_format == 'json_schema':
+            response_format = {'type': 'json_schema', 'json_schema': {'name': role, 'strict': True, 'schema': output_schema}}
+        else:
+            response_format = {'type': 'json_object'}
+            prompt += '\nReturn JSON matching this schema: ' + json.dumps(output_schema, ensure_ascii=False)
         content = [{"type":"text", "text":json.dumps({"data":payload},ensure_ascii=False)}]
         for p in images or []:
             content.append({"type":"image_url", "image_url":{"url":encoded_image(p)}})
-        error = None
-        schema_format={"type":"json_schema","json_schema":{"name":role,"strict":True,"schema":output_schema}}
+        messages = [{'role': 'system', 'content': prompt}, {'role': 'user', 'content': content}]
         for attempt in range(2):
-            started = time.monotonic()
-            max_tokens = int(os.environ.get("MODEL_MAX_TOKENS_" + role.upper(), "3000" if role == "planning" else "1800"))
-            request={"model":self.model,"messages":[{"role":"system","content":prompt},{"role":"user","content":content}],"temperature":0.2,"max_tokens":max_tokens,"response_format":schema_format}
-            response=self._post(self.url+"/chat/completions",request,'Text generation')
-            format_name='json_schema'
-            if response.status_code in {400,422} and self.provider=='polza':
-                request['response_format']={"type":"json_object"}
-                content[0]["text"] += "\nReturn only one JSON object matching the requested fields."
-                response=self._post(self.url+"/chat/completions",request,'Text generation')
-                format_name='json_object'
-            self.calls.append({"role":role,"provider":self.provider,"mode":self.mode,"model":self.model,"seconds":round(time.monotonic()-started,3),"status_code":response.status_code,"attempt":attempt+1,"response_format":format_name})
-            if response.status_code>=400:raise self._request_error(response,'Text generation')
-            try:raw=self._message_text(response.json()["choices"][0]["message"])
-            except (KeyError,IndexError,TypeError,ValueError) as exc:raise ModelUnavailable('Text generation returned an invalid response envelope') from exc
+            document = self._request('POST', '/chat/completions', self.endpoint, role, body={
+                'model': self.model, 'messages': messages, **inference,
+                'response_format': response_format})
             try:
-                result=schema.model_validate_json(raw)
-                if self.cache_enabled:
-                    cache.parent.mkdir(parents=True,exist_ok=True);cache.write_text(result.model_dump_json(),encoding='utf-8')
-                return result
-            except (ValueError,TypeError) as exc:
-                error = exc
-                content[0]["text"] += "\nPrevious response failed schema validation. Return a corrected JSON object."
-        raise ValueError("Model returned invalid structured output") from error
+                choice = document['choices'][0]
+                raw = choice['message']['content']
+            except (KeyError, IndexError, TypeError):
+                raise ModelUnavailable('API модели не вернул сообщение в choices[0].') from None
+            if choice.get('finish_reason') == 'length':
+                raise ModelUnavailable(f'Ответ модели обрезан: увеличьте MODEL_MAX_TOKENS_{role.upper()}.')
+            if not isinstance(raw, str) or not raw.strip():
+                raise ModelUnavailable('API модели вернул пустой ответ или отказ.')
+            try:
+                result = schema.model_validate_json(raw)
+            except ValidationError as exc:
+                issues = validation_issues(exc, output_schema)
+                # Persist paths/types only, never the response, input values or
+                # validator messages (custom validators can embed source text).
+                diagnostic = [{'path': item['path'], 'type': item['type']} for item in issues]
+                self.calls[-1]['validation_errors'] = diagnostic
+                log.warning('Model output validation failed: role=%s attempt=%s errors=%s',
+                            role, attempt + 1, json.dumps(diagnostic, ensure_ascii=False))
+                if attempt == 0:
+                    feedback = {'validation_errors': issues,
+                                'instruction': 'Return the complete corrected JSON object, not a patch. '
+                                'Fix the listed fields using the exact allowed values from the schema. '
+                                'Preserve source facts and claim references; do not invent or drop content. '
+                                'Do not include Markdown fences or explanations outside JSON.'}
+                    messages.extend([{'role': 'assistant', 'content': raw},
+                                     {'role': 'user', 'content': json.dumps(feedback, ensure_ascii=False)}])
+                continue
+            if self.cache_enabled:
+                cache.parent.mkdir(parents=True,exist_ok=True);cache.write_text(result.model_dump_json(),encoding='utf-8')
+            return result
+        details = '; '.join(item['path'] + ': ' + item['type'] for item in issues[:3])
+        raise ModelUnavailable(f'Модель дважды вернула JSON, не соответствующий схеме {role}: {details}. '
+                               'Повторите генерацию; исходные материалы сохранены.')
 
     def image(self, prompt, output: Path):
-        if self.provider=='polza':
-            url=os.environ.get('POLZA_IMAGE_BASE_URL','https://polza.ai/api/v2').rstrip('/')
-            model=os.environ.get('POLZA_IMAGE_MODEL') or self.manifest['image']['api_model']
-        else:
-            url=os.environ.get("T2I_BASE_URL","").rstrip("/")
-            if not url: raise ModelUnavailable("T2I_BASE_URL is required for image generation")
-            self.key=os.environ.get("T2I_API_KEY","")
-            model=os.environ.get('T2I_MODEL') or self.manifest['image']['repository']
-        size=f"{os.environ.get('T2I_WIDTH','1344')}x{os.environ.get('T2I_HEIGHT','768')}"
-        cache=self._cache_path('images',[model.encode(),size.encode(),prompt.encode()],'png')
+        endpoint = self.image_endpoint
+        if not endpoint.configured:
+            raise ModelUnavailable('Настройте POLZA_API_KEY или отдельный T2I API.')
+        size = f"{os.environ.get('T2I_WIDTH','1024')}x{os.environ.get('T2I_HEIGHT','576')}"
+        aspect = os.environ.get('T2I_ASPECT_RATIO', '16:9')
+        if endpoint.provider == 'polza' and endpoint.model == 'tongyi-mai/z-image':
+            if len(prompt) > 1000:
+                raise ValueError('Z-Image принимает промпт до 1000 символов; сократите инструкцию к иллюстрации.')
+            if aspect not in {'1:1', '4:3', '3:4', '16:9', '9:16'}:
+                raise ValueError('Unsupported T2I_ASPECT_RATIO for Z-Image')
+        cache=self._cache_path('images',[endpoint.url.encode(),endpoint.model.encode(),size.encode(),aspect.encode(),prompt.encode()],'png')
         if self.cache_enabled and cache.exists():
             output.parent.mkdir(parents=True,exist_ok=True);output.write_bytes(cache.read_bytes())
-            self.calls.append({'role':'text_to_image','provider':'cache','model':model,'status_code':200});return
-        started=time.monotonic()
-        response=self._post(url+"/images/generations",{"model":model,"prompt":prompt,"n":1,"size":size,"response_format":"b64_json"},'Image generation',timeout=float(os.environ.get('T2I_TIMEOUT_SECONDS','600')))
-        if response.status_code>=400:raise self._request_error(response,'Image generation')
-        payload=response.json();item=self._image_item(payload)
-        if item is None and payload.get('id'):
-            item=self._poll_image(str(payload['id']))
-        if item is None:raise ModelUnavailable('Image generation returned neither image data nor a task id')
+            self.calls.append({'role':'text_to_image','provider':'cache','model':endpoint.model,'status_code':200});return
+        timeout = float(os.environ.get('T2I_TIMEOUT_SECONDS', '180'))
+        if endpoint.provider == 'polza':
+            deadline = time.monotonic() + timeout
+            document = self._request('POST', '/media', endpoint, 'text_to_image',
+                body={'model': endpoint.model, 'input': {'prompt': prompt, 'aspect_ratio': aspect}, 'async': True},
+                timeout=min(timeout, 30), attempts=1)
+            media_id = document.get('id', '')
+            if not isinstance(media_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', media_id):
+                raise ModelUnavailable('Polza не вернул ID генерации изображения.')
+            while document.get('status') in {'pending', 'processing'}:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ModelUnavailable('Превышено время ожидания генерации изображения в Polza.')
+                time.sleep(min(3, remaining))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ModelUnavailable('Превышено время ожидания генерации изображения в Polza.')
+                document = self._request('GET', '/media/' + media_id, endpoint, 'image_status', timeout=min(30, remaining), attempts=1)
+            if document.get('status') != 'completed':
+                raise ModelUnavailable('Polza не завершил генерацию изображения; проверьте историю в кабинете провайдера.')
+            item = document.get('data')
+        else:
+            document = self._request('POST', '/images/generations', endpoint, 'text_to_image',
+                body={'model': endpoint.model, 'prompt': prompt, 'size': size, 'response_format': 'b64_json'},
+                timeout=timeout, attempts=1)
+            item = document.get('data')
+        if isinstance(item, list):
+            item = item[0] if item else None
+        if not isinstance(item, dict):
+            raise ModelUnavailable('API не вернул данные изображения.')
         if item.get('b64_json'):
-            try:raw=base64.b64decode(item['b64_json'],validate=True)
-            except (ValueError,TypeError) as exc:raise ModelUnavailable('Image generation returned invalid base64 data') from exc
-        elif item.get('url'):
-            download=self.client.get(item['url'],headers={"Authorization":"Bearer "+self.key},timeout=float(os.environ.get('T2I_TIMEOUT_SECONDS','600')),follow_redirects=True)
-            if download.status_code>=400:raise self._request_error(download,'Image download')
-            raw=download.content
-        else:raise ModelUnavailable('Image generation completed without image content')
+            raw = base64.b64decode(item['b64_json'], validate=True)
+        elif endpoint.provider == 'polza' and item.get('url'):
+            raw = self._download_polza_image(item['url'])
+        else:
+            raise ModelUnavailable('API не вернул изображение в ожидаемом формате.')
         from PIL import Image
-        im=Image.open(io.BytesIO(raw)); im.verify()
-        output.parent.mkdir(parents=True,exist_ok=True); output.write_bytes(raw)
+        with Image.open(io.BytesIO(raw)) as im:
+            im.verify()
+        # Keep the extension, MIME type and cache format consistent.
+        with Image.open(io.BytesIO(raw)) as im:
+            buffer = io.BytesIO(); im.convert('RGB').save(buffer, 'PNG'); raw = buffer.getvalue()
+        output.parent.mkdir(parents=True,exist_ok=True);output.write_bytes(raw)
         if self.cache_enabled:
             cache.parent.mkdir(parents=True,exist_ok=True);cache.write_bytes(raw)
-        self.calls.append({"role":"text_to_image","provider":self.provider,"model":model,"seconds":round(time.monotonic()-started,3),"status_code":response.status_code})
 
-    @classmethod
-    def _image_item(cls,payload):
-        if not isinstance(payload,dict):return None
-        data=payload.get('data')
-        if isinstance(data,list) and data and isinstance(data[0],dict):return data[0]
-        if payload.get('b64_json') or payload.get('url'):return payload
-        for key in ('result','output','response'):
-            nested=payload.get(key)
-            if isinstance(nested,list) and nested and isinstance(nested[0],dict):return nested[0]
-            item=cls._image_item(nested)
-            if item:return item
-        return None
-
-    def _poll_image(self,task_id: str):
-        timeout=float(os.environ.get('T2I_POLL_TIMEOUT_SECONDS','900'));interval=float(os.environ.get('T2I_POLL_INTERVAL_SECONDS','3'))
-        endpoint=os.environ.get('POLZA_MEDIA_BASE_URL',self.url).rstrip('/')+'/media/'+task_id
-        deadline=time.monotonic()+timeout
-        while time.monotonic()<deadline:
-            try:response=self.client.get(endpoint,headers=self._headers(),timeout=30)
-            except httpx.HTTPError:
-                time.sleep(interval);continue
-            if response.status_code>=400:raise self._request_error(response,'Image status check')
-            payload=response.json();item=self._image_item(payload)
-            if item:return item
-            if str(payload.get('status','')).lower() in {'failed','error','cancelled'}:
-                raise ModelUnavailable('Image generation task failed')
-            time.sleep(interval)
-        raise ModelUnavailable('Image generation did not finish before the timeout')
+    def _download_polza_image(self, url):
+        parsed = urlsplit(url)
+        host = parsed.hostname or ''
+        if parsed.scheme != 'https' or not (host == 'polza.ai' or host.endswith('.polza.ai')) or parsed.username or parsed.password:
+            raise ModelUnavailable('Неожиданный адрес изображения от Polza.')
+        try:
+            # CDN requests never carry the API Authorization header.
+            with self.client.stream('GET', url, timeout=60, follow_redirects=False) as response:
+                if response.status_code != 200:
+                    raise ModelUnavailable('Не удалось скачать изображение из Polza.')
+                chunks=[];size=0
+                for chunk in response.iter_bytes():
+                    size += len(chunk)
+                    if size > 30 * 1024**2:
+                        raise ModelUnavailable('Изображение превышает лимит 30 MiB.')
+                    chunks.append(chunk)
+                return b''.join(chunks)
+        except httpx.RequestError:
+            raise ModelUnavailable('Не удалось скачать изображение из Polza.') from None

@@ -9,7 +9,8 @@ from .contracts import ContentIR,DesignIR,GenerateRequest,SceneIR,AuditReport,Re
 from .store import Store
 from .settings import artifact_path,ROOT,config
 from .model import ModelGateway
-from .planning import plan_with_model,build_scenes,regenerate_slide_with_model,enrich_plan,validate_plan,assign_visual_strategies,protect_text_from_template_decor,visual_contract_for
+from .planning import plan_with_model,build_scenes,regenerate_slide_with_model,enrich_plan,validate_plan,assign_visual_strategies,protect_text_from_template_decor,visual_contract_for,usable_prototypes
+from .template import import_template
 from .export import export_pptx,render,export_html
 from .audit import audit_scene,audit_rendered_deck,contextual_audit,project_contextual_issues,repair_scene
 from .selection import score_candidate,choose_variants,compose_scene
@@ -76,7 +77,10 @@ class Pipeline:
             content=ContentIR.model_validate_json(artifact_path(parentresult['artifacts']['content']).read_bytes())
             plan=PresentationPlan.model_validate_json(artifact_path(parentresult['artifacts']['plan']).read_bytes())
         else:
-            design=DesignIR.model_validate(json.loads(tr.document));content=ContentIR.model_validate(json.loads(cr.document))
+            # Re-import the immutable PPTX so retries benefit from parser fixes.
+            design=import_template(template);content=ContentIR.model_validate(json.loads(cr.document))
+        # Reject an unusable template before starting paid API generation.
+        usable_prototypes(design)
         if parentresult and parentresult.get('palette'):
             source_design_path=parentresult.get('artifacts',{}).get('source_design',parentresult['artifacts']['design'])
             source_design=DesignIR.model_validate_json(artifact_path(source_design_path).read_bytes())
@@ -206,32 +210,29 @@ class Pipeline:
         return manifest
 
     def _generate_image(self,slide,content,folder,job_id,suffix=''):
-        from .runtime import local_image_phase
         output=folder/(slide.id+'-generated.png')
-        with local_image_phase():self.gateway.image(illustration_prompt(slide)+suffix,output)
+        self.gateway.image(illustration_prompt(slide)+suffix,output)
         from PIL import Image
         with Image.open(output) as generated:media={'PNG':'image/png','JPEG':'image/jpeg','WEBP':'image/webp'}[generated.format]
-        provider=getattr(self.gateway,'provider','configured-provider');manifest=getattr(self.gateway,'manifest',{})
-        image_model=manifest.get('image',{}).get('api_model','configured-image-model')
+        provider=getattr(getattr(self.gateway,'image_endpoint',None),'provider','configured-provider')
+        image_model=getattr(getattr(self.gateway,'image_endpoint',None),'model','configured-image-model')
         source=f'AI-generated via {provider}/{image_model}; illustrative, not factual evidence'
         asset=Asset(id=slide.id+'-generated-'+job_id[:8],path=str(output.relative_to(artifact_path('.'))),description=slide.visual_brief or slide.message,source=source,media_type=media,claim_ids=slide.claim_ids)
         content.assets.append(asset);return asset
 
     def _generate_image_candidates(self,slide,content,folder,job_id,instruction=''):
         """Generate a small contact set, score it with the vision model and keep only a defensible choice."""
-        from .runtime import local_image_phase
         count=config('pipeline.yaml')['image_candidate_count'];paths=[];assets=[]
         variations=(' editorial cutaway view',' clean side-on composition',' restrained wide overview')
-        with local_image_phase():
-            for index in range(count):
-                output=folder/f'{slide.id}-candidate-{index+1}.png'
-                prompt=illustration_prompt(slide)+variations[index%len(variations)]+('. '+instruction.strip() if instruction.strip() else '')
-                self.gateway.image(prompt,output);paths.append(output)
+        for index in range(count):
+            output=folder/f'{slide.id}-candidate-{index+1}.png'
+            prompt=illustration_prompt(slide)+variations[index%len(variations)]+('. '+instruction.strip() if instruction.strip() else '')
+            self.gateway.image(prompt,output);paths.append(output)
         from PIL import Image
         for index,output in enumerate(paths):
             with Image.open(output) as generated:media={'PNG':'image/png','JPEG':'image/jpeg','WEBP':'image/webp'}[generated.format]
-            provider=getattr(self.gateway,'provider','configured-provider');manifest=getattr(self.gateway,'manifest',{})
-            image_model=manifest.get('image',{}).get('api_model','configured-image-model')
+            provider=getattr(getattr(self.gateway,'image_endpoint',None),'provider','configured-provider')
+            image_model=getattr(getattr(self.gateway,'image_endpoint',None),'model','configured-image-model')
             source=f'AI-generated via {provider}/{image_model}; illustrative, not factual evidence'
             asset=Asset(id=f'{slide.id}-candidate-{index+1}-{job_id[:8]}',path=str(output.relative_to(artifact_path('.'))),description=slide.visual_contract.goal or slide.message,source=source,media_type=media,claim_ids=slide.claim_ids)
             content.assets.append(asset);assets.append(asset)

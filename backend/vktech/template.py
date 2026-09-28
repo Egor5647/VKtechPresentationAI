@@ -160,13 +160,17 @@ def import_template(data: bytes) -> DesignIR:
                     pts=[(a*px+c*py+e,b*px+d*py+f) for px,py in ((xx,yy),(xx+w,yy),(xx,yy+h),(xx+w,yy+h))]
                     box=Box(x=min(p[0] for p in pts)/width,y=min(p[1] for p in pts)/height,w=(max(p[0] for p in pts)-min(p[0] for p in pts))/width,h=(max(p[1] for p in pts)-min(p[1] for p in pts))/height)
                     st=resolver.style(shape)
-                    ph=shape.find('.//p:ph',NS); typ=ph.get('type','body') if ph is not None else ''
+                    ph=shape.find('.//p:ph',NS); typ=ph.get('type','obj') if ph is not None else ''
                     content_visual=(tag in ('pic','graphicFrame') and box.w*box.h>.04) or (not text and .15<box.y<.88 and box.y+box.h<.9 and 0<box.w*box.h<.65)
                     role='footer' if typ in ('ftr','dt','sldNum') or (box.y>.9 and len(text)<90) else 'body' if text else 'visual' if content_visual else 'decor'
                     if typ in ('title','ctrTitle'): role='title'
+                    elif tag=='sp' and typ in ('body','obj','subTitle'):
+                        # Empty placeholders are intentional editable text slots;
+                        # their geometry and typography can come from the layout.
+                        role='body'
                     slots.append(Slot(id=f"s{sid}",shape_id=sid,role=role,box=box,style=st,source_text=text,source_path=spath))
-                    if text:
-                        fonts[st.font]+=len(text); sizes[st.size]+=1; palette[st.color]+=1
+                    if text or role in ('title','body'):
+                        fonts[st.font]+=max(1,len(text)); sizes[st.size]+=1; palette[st.color]+=1
                     if st.fill: palette[st.fill]+=1
         tree=root.find('p:cSld/p:spTree',NS)
         if tree is not None: walk(tree)

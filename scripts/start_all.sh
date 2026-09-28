@@ -4,33 +4,18 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
 
-REQUESTED_MODEL_MODE=${MODEL_MODE:-}
 if [ -f "$ROOT/.env" ]; then
   set -a
   . "$ROOT/.env"
   set +a
 fi
-[ -n "$REQUESTED_MODEL_MODE" ] && MODEL_MODE=$REQUESTED_MODEL_MODE
-
-export AI_PROVIDER=${AI_PROVIDER:-polza}
-if [ "$AI_PROVIDER" != "polza" ]; then
-  echo "For local compatibility mode run: make run-local" >&2
-  exit 2
-fi
-if [ -z "${POLZA_API_KEY:-}" ]; then
-  echo "POLZA_API_KEY is empty. Add it to .env before starting the service." >&2
-  exit 2
-fi
 
 export DATA_DIR=${DATA_DIR:-"$ROOT/data"}
 export DATABASE_URL=${DATABASE_URL:-"sqlite:///$ROOT/data/service.sqlite"}
-export MODEL_PROFILE=${MODEL_PROFILE:-selection}
-export MODEL_MODE=${MODEL_MODE:-quality}
 export MODEL_MAX_TOKENS_PLANNING=${MODEL_MAX_TOKENS_PLANNING:-6500}
-SOFFICE=${SOFFICE:-soffice}
-PDFTOPPM=${PDFTOPPM:-pdftoppm}
-case "$SOFFICE" in */*) ;; *) SOFFICE=$(command -v "$SOFFICE" || true) ;; esac
-case "$PDFTOPPM" in */*) ;; *) PDFTOPPM=$(command -v "$PDFTOPPM" || true) ;; esac
+# .env may contain command names (SOFFICE=soffice), not absolute paths.
+SOFFICE=$(command -v "${SOFFICE:-soffice}" || true)
+PDFTOPPM=$(command -v "${PDFTOPPM:-pdftoppm}" || true)
 export SOFFICE PDFTOPPM
 
 if [ -z "$SOFFICE" ] && [ -x /Applications/LibreOffice.app/Contents/MacOS/soffice ]; then
@@ -42,14 +27,17 @@ for required in "$ROOT/.venv/bin/python" "$SOFFICE" "$PDFTOPPM"; do
     exit 2
   fi
 done
+if ! command -v curl >/dev/null 2>&1; then
+  echo "curl is required. On Debian/Ubuntu: sudo apt-get install curl" >&2
+  exit 2
+fi
 
 if [ ! -f "$ROOT/frontend/dist/index.html" ]; then
-  if command -v pnpm >/dev/null 2>&1; then
-    (cd "$ROOT/frontend" && pnpm run build)
-  else
-    (cd "$ROOT/frontend" && corepack pnpm run build)
-  fi
+  sh "$ROOT/scripts/pnpm.sh" install --frozen-lockfile --prod=false
+  sh "$ROOT/scripts/pnpm.sh" run build
 fi
+
+"$ROOT/.venv/bin/python" -c 'from vktech.model import model_endpoint; import sys; sys.exit(0 if model_endpoint().configured else "Set POLZA_API_KEY in .env before starting the application")'
 
 LOG_DIR="$ROOT/.local/logs"
 mkdir -p "$LOG_DIR" "$DATA_DIR"
@@ -73,7 +61,7 @@ start_process() {
 wait_url() {
   url=$1
   name=$2
-  attempts=${3:-60}
+  attempts=${3:-180}
   while [ "$attempts" -gt 0 ]; do
     if curl -fsS "$url" >/dev/null 2>&1; then return 0; fi
     attempts=$((attempts-1))
@@ -88,9 +76,7 @@ start_process worker "$ROOT/.venv/bin/python" -m vktech.worker
 wait_url http://127.0.0.1:8000/api/health api 60
 
 echo "Service is ready: http://127.0.0.1:8000"
-echo "Inference: Polza.ai ($MODEL_MODE)"
 echo "Logs: $LOG_DIR"
-if command -v open >/dev/null 2>&1; then open http://127.0.0.1:8000; fi
 
 while :; do
   for pid in $PIDS; do

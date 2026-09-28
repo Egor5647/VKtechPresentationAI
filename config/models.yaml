@@ -1,35 +1,15 @@
-version: 2
+version: 3
 text:
-  default_mode: quality
-  modes:
-    fast:
-      repository: mlx-community/Qwen3-VL-4B-Instruct-4bit
-      api_model: qwen/qwen3-vl-8b-instruct
-      api_parameters: 8000000000
-      revision: 2fd8dacbdb8f1e54b8c005f081ec5bf79c56376b
-      parameters: 4437815808
-      license: Apache-2.0
-      open_weights: true
-      roles: [planning, vision_audit]
-      aliases: [Qwen/Qwen3-VL-4B-Instruct, qwen/qwen3-vl-8b-instruct]
-    quality:
-      repository: mlx-community/Ministral-3-14B-Instruct-2512-4bit
-      api_model: qwen/qwen3.8-27b
-      api_parameters: 27000000000
-      revision: 95b6f345475c8c8c92b7959d02f4ad86d3ba8384
-      parameters: 13945032240
-      license: Apache-2.0
-      open_weights: true
-      roles: [planning, vision_audit]
-      aliases: [mistralai/Ministral-3-14B-Instruct-2512, qwen/qwen3.8-27b]
+  provider: polza
+  base_url: https://polza.ai/api/v1
+  model: qwen/qwen3.8-27b
+  # Strict JSON Schema exhausted the token budget in a live full-schema check.
+  # Send the schema in the prompt and validate every JSON response locally.
+  response_format: json_object
+  aliases: [qwen3.8-27b]
+  roles: [planning, regenerate_slide, vision_audit, image_selection]
 image:
-  repository: Tongyi-MAI/Z-Image-Turbo
-  api_model: qwen/image-2
-  local_repository: mzbac/Z-Image-Turbo-8bit
-  local_revision: 1cc2c9cb261a04e5ad86ba0315b9e256c70fc1fa
-  quantization: 8-bit MLX
-  revision: f332072aa78be7aecdf3ee76d5c247082da564a6
-  parameters: 10261196515
-  license: Apache-2.0
-  open_weights: true
+  provider: polza
+  base_url: https://polza.ai/api/v1
+  model: tongyi-mai/z-image
   roles: [text_to_image]

@@ -544,8 +544,8 @@ def plan_with_model(gateway,content,request):
             error=None
             for attempt in range(3):
                 plan=fit_semantic_variants(normalize_plan(gateway.structured('planning',batch_payload,PresentationPlan,images=model_images)))
-                # IDs are transport metadata, not authored content. Small local
-                # models often repeat them even when every slide is distinct.
+                # IDs are transport metadata, not authored content. Providers
+                # can repeat them even when every slide is distinct.
                 # Assign deterministic batch IDs here; global IDs are assigned
                 # again when the source-ordered batches are combined.
                 for local_index,slide in enumerate(plan.slides):slide.id=f'slide-{local_index+1}'
@@ -590,9 +590,8 @@ def plan_with_model(gateway,content,request):
                         batch_payload['correction']='Return a complete corrected plan. Fix validation_feedback exactly. Use each slide_assignment focus_terms in takeaway, balanced_message and message. Preserve comparison direction and optimization meaning. Make the three density texts independently complete and visibly different. Rewrite every overlong field as a shorter complete sentence; never cut a word or clause. Replace every repeated or near-duplicate title or main idea with a distinct source-backed teaching step. Every required_claim_id must occur in at least one slide.claim_ids.'
             raise error
 
-        # Small local models tend to repeat a short tail when constrained to one
-        # very large JSON object. Plan long decks in coherent source-ordered
-        # segments, then validate the combined story as one presentation.
+        # Large JSON plans are less stable as one response. Plan long decks in
+        # coherent source-ordered segments, then validate the combined story.
         if request.slide_count>12:
             batch_total=(request.slide_count+5)//6
             base=request.slide_count//batch_total;extra=request.slide_count%batch_total
@@ -661,7 +660,10 @@ def usable_prototypes(design):
     for p in design.prototypes:
         title=next((s for s in p.slots if s.role=='title'),None)
         bodies=body_slots(p)
-        if title and title.box.w>.35 and title.box.h>.06 and bodies:
+        # A one-line 20 pt title on a widescreen slide can be less than 6%
+        # of its height. Judge the inherited slot in points.
+        title_height_pt=title.box.h*design.height/12700 if title else 0
+        if title and title.box.w>.25 and title_height_pt>=title.style.size and bodies:
             visual_area=sum(s.box.w*s.box.h for s in p.slots if s.role=='visual')
             central_decor=sum(s.box.w*s.box.h for s in p.slots if s.role=='decor' and s.box.y<.9 and s.box.w*s.box.h>.01)
             score=max(s.box.w*s.box.h for s in bodies)+.12*sum(s.box.w*s.box.h for s in bodies)
@@ -673,7 +675,9 @@ def usable_prototypes(design):
             score-=.02*len(bodies)
             score-=1 if any(re.search(r'\bpadding\b|\bmargin\b|\bbody\s*\{',s.source_text) for s in bodies) else 0
             candidates.append((score,p))
-    if not candidates: raise NeedsInput('Template has no usable title/body composition. Add a sample content slide.')
+    if not candidates:
+        raise NeedsInput('В PPTX не найден слайд с пригодными областями заголовка и основного текста. '
+                         'Добавьте слайд «Заголовок и содержимое»; текстовые заполнители могут быть пустыми.')
     return [p for _,p in sorted(candidates,key=lambda x:(-x[0],x[1].id))]
 
 

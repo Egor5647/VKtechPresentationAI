@@ -1,11 +1,22 @@
 from __future__ import annotations
 import io
+import os
 import pytest
 from pptx import Presentation
 from pptx.util import Inches,Pt
 from pptx.dml.color import RGBColor
 from vktech.contracts import ContentIR,PresentationPlan,PlanSlide
 from vktech.settings import ROOT
+
+
+@pytest.fixture(autouse=True)
+def isolated_model_environment(monkeypatch, tmp_path):
+    """Keep local API credentials and production data out of offline tests."""
+    for name in list(os.environ):
+        if name.startswith(('MODEL_', 'POLZA_', 'T2I_', 'VK_', 'LOCAL_MODEL_')):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv('DATA_DIR', str(tmp_path / 'data'))
+    monkeypatch.setenv('DATABASE_URL', 'sqlite:///' + str(tmp_path / 'service.sqlite'))
 
 
 @pytest.fixture
@@ -23,6 +34,21 @@ def template_bytes():
 
 @pytest.fixture
 def content():return ContentIR.model_validate_json((ROOT/'fixtures/content.example.json').read_bytes())
+
+
+@pytest.fixture
+def empty_placeholder_template():
+    prs=Presentation();prs.slide_width=Inches(13.333333);prs.slide_height=Inches(7.5)
+    layout=prs.slide_layouts[1]
+    title=layout.placeholders[0]
+    title.left=Inches(.5);title.top=Inches(.4);title.width=Inches(9);title.height=Pt(30)
+    title.text_frame.paragraphs[0].font.name='DejaVu Sans'
+    title.text_frame.paragraphs[0].font.size=Pt(20)
+    body=layout.placeholders[1]
+    body.text_frame.paragraphs[0].font.name='DejaVu Sans'
+    body.text_frame.paragraphs[0].font.size=Pt(18)
+    prs.slides.add_slide(layout)
+    out=io.BytesIO();prs.save(out);return out.getvalue()
 
 
 @pytest.fixture

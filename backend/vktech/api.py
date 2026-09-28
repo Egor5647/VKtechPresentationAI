@@ -13,6 +13,7 @@ from .template import import_template
 from .content import import_content
 from .settings import artifact_path,ROOT,config
 from .store import Store,job_document
+from .model import model_endpoint
 
 @asynccontextmanager
 async def lifespan(app):
@@ -52,9 +53,8 @@ async def uploaded(file):
 @app.get('/api/health')
 def health():
     import shutil
-    from .model import inference_status
-    inference=inference_status()
-    return {'status':'ok','profile':os.environ.get('MODEL_PROFILE','selection'),'provider':inference['provider'],'model_mode':inference['mode'],'model_name':inference['model'],'model_configured':inference['model_configured'],'image_model_name':inference['image_model'],'image_model_configured':inference['image_model_configured'],'renderer_available':bool(shutil.which(os.environ.get('SOFFICE','soffice'))),'database':store().engine.dialect.name}
+    text=model_endpoint();image=model_endpoint('image')
+    return {'status':'ok','profile':text.provider,'model_mode':'api','model_name':text.model,'model_configured':text.configured,'image_model_configured':image.configured,'image_model_name':image.model,'renderer_available':bool(shutil.which(os.environ.get('SOFFICE','soffice'))),'database':store().engine.dialect.name}
 
 
 @app.post('/api/templates')
@@ -100,9 +100,8 @@ def contents():return [{'id':r.id,'name':r.name,'content':json.loads(r.document)
 @app.post('/api/jobs',status_code=202)
 def generate(request:GenerateRequest):
     store().record(request.template_id,'template');store().record(request.content_id,'content')
-    from .model import inference_status
-    if request.generate_images and not inference_status()['image_model_configured']:
-        raise ValueError('Генерация новых иллюстраций недоступна: API для изображений не настроен. Снимите этот флажок.')
+    if request.generate_images and not model_endpoint('image').configured:
+        raise ValueError('Генерация иллюстраций недоступна: настройте API-ключ или снимите этот флажок.')
     return {'id':store().enqueue('generate',request.model_dump())}
 
 
@@ -180,9 +179,8 @@ def update_visual(jid:str,request:VisualUpdateRequest):
     result=json.loads(parent.result)
     if request.slide_id not in result.get('selection',{}):raise ValueError('Unknown slide ID')
     if request.selection is not None and set(request.selection)!=set(result['selection']):raise ValueError('Selection must contain every slide exactly once')
-    from .model import inference_status
-    if request.mode=='image' and not request.candidate_asset_id and not inference_status()['image_model_configured']:
-        raise ValueError('Генерация новых иллюстраций недоступна: API для изображений не настроен')
+    if request.mode=='image' and not request.candidate_asset_id and not model_endpoint('image').configured:
+        raise ValueError('Генерация иллюстраций недоступна: настройте API-ключ')
     return {'id':store().enqueue('regenerate_visual',{'parent_job_id':jid,'request':request.model_dump()})}
 
 

@@ -83,3 +83,9 @@ needs_input. Возвращай needs_input только когда в claims д
 числа должны быть сохранены.
 Если исходных материалов недостаточно, верни needs_input и объяснение,
 не заполняй недостающие сведения догадками.
+
+Соблюдай точные значения перечислений схемы. Поле visual допускает только
+none, chart, table, sequence, list, hierarchy или image. Значение diagram
+принадлежит visual_strategy, а не visual: для схемы выбери sequence, list или
+hierarchy по её смыслу. Поле role допускает только cover, content или divider;
+summary — это archetype, а не role. Не добавляй поля, которых нет в схеме.
