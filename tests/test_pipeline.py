@@ -217,6 +217,36 @@ def test_visual_strategy_uses_reviewed_image_for_real_world_model_limit(content,
     assert 'Общая память' in enriched.visual_contract.entities
 
 
+def test_visual_strategy_illustrates_concurrency_parallelism_without_diagram(content,plan):
+    draft=plan.model_copy(deep=True);target=draft.slides[4]
+    target.title='Различие concurrency и parallelism'
+    target.message='Concurrency чередует задачи, а parallelism выполняет их одновременно.'
+    selected=assign_visual_strategies(draft,content,True).slides[4]
+    assert selected.visual_strategy=='generated_image' and selected.visual_score>=.85
+    enriched=enrich_plan(PresentationPlan(slides=[selected]),content).slides[0]
+    assert enriched.visual_contract.diagram is None
+    assert 'Один вычислительный исполнитель' in enriched.visual_contract.entities
+
+
+def test_visual_strategy_illustrates_physical_production_bottleneck(content,plan):
+    draft=plan.model_copy(deep=True);target=draft.slides[4]
+    target.title='Пределы полезного параллелизма в production'
+    target.message='Реальные bottleneck включают bandwidth, cache, NUMA, locks и oversubscription.'
+    selected=assign_visual_strategies(draft,content,True).slides[4]
+    assert selected.visual_strategy=='generated_image'
+    enriched=enrich_plan(PresentationPlan(slides=[selected]),content).slides[0]
+    assert 'Узкий канал доступа' in enriched.visual_contract.entities
+
+
+def test_visual_strategy_keeps_exact_scheduler_bounds_editable(content,plan):
+    draft=plan.model_copy(deep=True);target=draft.slides[4]
+    target.title='Верхняя граница level-by-level scheduler'
+    target.message='Для unit-cost DAG выполняется T_P ≤ W/P + S.'
+    target.visual='sequence'
+    selected=assign_visual_strategies(draft,content,True).slides[4]
+    assert selected.visual_strategy=='diagram'
+
+
 def test_image_candidates_are_scored_and_best_is_selected(content,plan,monkeypatch):
     class Gateway:
         def image(self,prompt,output):Image.new('RGB',(160,90),'white').save(output)

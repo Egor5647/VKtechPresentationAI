@@ -305,6 +305,24 @@ def normalize_plan(plan: PresentationPlan) -> PresentationPlan:
     return result
 
 
+def _illustration_concept(slide: PlanSlide) -> tuple[str,float] | None:
+    """Return a concrete, defensible editorial illustration concept.
+
+    Technical vocabulary alone is not enough: DAGs, formulas and algorithms are
+    clearer as editable diagrams.  Images are reserved for contrasts and
+    physical constraints that can be understood from a scene without labels.
+    """
+    text=' '.join((slide.title,slide.message,slide.visual_brief)).lower()
+    if re.search(r'concurrenc|конкурент',text) and re.search(r'parallelism|параллелизм',text):
+        return 'concurrency_parallelism',.9
+    bottlenecks=sum(bool(re.search(pattern,text,re.I)) for pattern in (
+        r'bandwidth|пропускн',r'cache|кэш',r'numa',r'locks?|блокиров',r'contention|конкуренц\w*\s+за',r'oversubscription|переподпис',
+    ))
+    if bottlenecks>=3 and re.search(r'реальн|production|инженер|практич',text,re.I):
+        return 'real_system_bottleneck',.86
+    return None
+
+
 def assign_visual_strategies(plan: PresentationPlan,content: ContentIR,allow_generated: bool) -> PresentationPlan:
     """Choose the visual medium from slide semantics instead of a fixed image quota."""
     result=plan.model_copy(deep=True);last=len(result.slides)-1;assets={asset.id:asset for asset in content.assets}
@@ -316,6 +334,7 @@ def assign_visual_strategies(plan: PresentationPlan,content: ContentIR,allow_gen
     conceptual_words=re.compile(r'от\s+конкурент\w*\s+код\w*\s+к\s+абстракт|практическ\w*\s+реализац|инженерн\w*\s+(?:контекст|систем)|пользовательск\w*\s+сценар',re.I)
     for index,slide in enumerate(result.slides):
         text=' '.join((slide.title,slide.message,slide.visual_brief)).lower()
+        illustration=_illustration_concept(slide)
         generated_asset=assets.get(slide.asset_id) if slide.asset_id else None
         if generated_asset and not (generated_asset.source.startswith('Z-Image') or generated_asset.source.startswith('AI-generated')):generated_asset=None
         if slide.dataset_id:
@@ -327,6 +346,13 @@ def assign_visual_strategies(plan: PresentationPlan,content: ContentIR,allow_gen
             slide.visual_reason='Переход между двумя представлениями точнее показывает редактируемая схема.';continue
         if slide.role in {'cover','divider'} or index in {0,last}:
             slide.visual='none';slide.visual_strategy='none';slide.visual_score=.95;slide.visual_reason='Оформление шаблона уже выполняет визуальную функцию этого слайда.';continue
+        if illustration:
+            concept,score=illustration
+            slide.visual='image' if generated_asset else 'none';slide.visual_strategy='generated_image';slide.visual_score=score
+            slide.visual_reason=('Концептуальное различие понятнее через два наглядных сценария.' if concept=='concurrency_parallelism'
+                                 else 'Физические ограничения вычислительной системы уместно показать одной цельной иллюстрацией.')
+            if not allow_generated:slide.visual='none'
+            continue
         score=.18
         if slide.archetype=='illustration':score+=.55
         elif slide.archetype=='example':score+=.34
@@ -362,7 +388,19 @@ def assign_visual_strategies(plan: PresentationPlan,content: ContentIR,allow_gen
 
 def visual_contract_for(slide) -> VisualContract:
     """Describe what a visual must communicate and what it must avoid."""
-    layout=_diagram_layout(slide)
+    layout=_diagram_layout(slide);illustration=_illustration_concept(slide) if slide.visual_strategy=='generated_image' else None
+    image_presets={
+        'concurrency_parallelism':(
+            'Без подписей показать различие: concurrency чередует несколько задач на одном исполнителе, parallelism выполняет несколько задач одновременно.',
+            ['Один вычислительный исполнитель','Несколько чередующихся потоков задач','Несколько одинаковых исполнителей','Одновременные задачи'],
+            ['Левая половина показывает чередование на одном исполнителе','Правая половина показывает одновременную работу нескольких исполнителей'],
+        ),
+        'real_system_bottleneck':(
+            'Показать, как параллельные вычислительные блоки упираются в общую память и ограниченную пропускную способность реальной системы.',
+            ['Одинаковые вычислительные блоки','Симметричные уровни кэша','Общая память','Узкий канал доступа'],
+            ['Параллельные потоки сходятся к общей памяти','Узкий канал создаёт видимое место насыщения'],
+        ),
+    }
     presets={
         'pram_reality':(
             'Сравнить идеальную PRAM с ограничениями реальной многоядерной системы.',
@@ -372,7 +410,8 @@ def visual_contract_for(slide) -> VisualContract:
         'reduction_tree':('Показать пошаговое сокращение числа элементов.',['Входы','Пары','Результат'],['Каждый уровень объединяет пары']),
         'fork_join':('Показать разветвление и синхронизацию задач.',['Fork','Параллельные задачи','Join'],['Ветви выходят из Fork и сходятся в Join']),
     }
-    goal,entities,relations=presets.get(layout,(slide.visual_brief or slide.message,slide.visual_items[:3],[slide.takeaway] if slide.takeaway else []))
+    concept=illustration[0] if illustration else None
+    goal,entities,relations=image_presets.get(concept,presets.get(layout,(slide.visual_brief or slide.message,slide.visual_items[:3],[slide.takeaway] if slide.takeaway else [])))
     existing=getattr(slide.visual_contract,'diagram',None)
     if existing and existing.kind==layout:
         labels=[node.label.strip() for node in existing.nodes]
@@ -387,7 +426,7 @@ def visual_contract_for(slide) -> VisualContract:
     )
     generic={'sequence','comparison','hierarchy','layers','memory_access','scheduler','formula_focus','abstraction','pram_reality'}
     allow_generic=bool(slide.logic_contract.main_assertion or slide.logic_contract.semantic_payload_hash)
-    diagram=(existing if layout not in {'work_span','critical_path'} and existing and existing.kind==layout else
+    diagram=(None if illustration else existing if layout not in {'work_span','critical_path'} and existing and existing.kind==layout else
              existing if source_weighted else default_diagram(layout,slide.visual_items or entities) if allow_generic or layout not in generic else None)
     if diagram:
         _,failures=graph_quality(layout,slide.visual_items or entities,diagram)

@@ -28,7 +28,9 @@ def workflow_manifest():
 
 def illustration_prompt(slide):
     text=(slide.title+' '+slide.message).lower()
-    suffix='Isometric editorial illustration, VK Education palette with vivid blue, cyan and magenta accents, soft depth, clean pale background, wide 16:9 composition, no words, no letters, no numbers, no logo'
+    suffix='Polished isometric editorial illustration, VK Education palette with vivid blue, cyan and restrained magenta accents, consistent geometry, soft depth, clean pale background, wide 16:9 composition, no words, no letters, no numbers, no logo, no interface, no arrows, no floating fragments'
+    if ('concurrency' in text or 'конкурент' in text) and ('parallelism' in text or 'параллелизм' in text):return 'A coherent split-scene computing metaphor. Left: one processor tile cleanly interleaves several colored task streams over time. Right: four identical processor tiles execute matching task streams simultaneously. Strong visual contrast, symmetric hardware, few purposeful objects, no people. '+suffix
+    if sum(word in text for word in ('bandwidth','cache','numa','locks','oversubscription'))>=3:return 'A coherent cutaway of one modern multicore computer. Several identical compute tiles and symmetric cache groups feed into one shared memory plane through a visibly narrow central data channel, creating one clear bandwidth bottleneck highlighted in magenta. Few purposeful objects, physically plausible connections, no loose cables, no server room. '+suffix
     if 'конкурент' in text and ('абстракт' in text or 'параллел' in text):return 'A tangled cluster of low-level concurrent threads on the left transforms into a clean abstract task graph with parallel branches on the right. '+suffix
     if 'реализац' in text or 'contention' in text or 'overhead' in text:return 'A coherent wide editorial cutaway of one multicore computer: three identical compute tiles, organized cache layers, one shared memory plane and one clearly visible contention bottleneck. Clean structural hierarchy, few purposeful objects, no floating hardware, no loose cables, no server room. '+suffix
     if 'вывод' in text or 'итог' in text:return 'A coherent overview of parallel computing: processors, shared memory, task graph and critical path assembled into one balanced system. '+suffix
@@ -141,6 +143,13 @@ class Pipeline:
             # accepted.  This pass guards facts, lengths and references after
             # curriculum repair while keeping legacy plans readable.
             validate_plan(plan,content,original.slide_count,validate_density=False)
+            if original.generate_images:
+                candidates=sorted((ps for ps in plan.slides if ps.visual_strategy=='generated_image' and not ps.asset_id),key=lambda ps:(-ps.visual_score,ps.id))[:config('pipeline.yaml')['max_generated_image_slides']]
+                image_started=time.monotonic();generated_count=0
+                for ps in candidates:
+                    image_candidates[ps.id]=self._generate_image_candidates(ps,content,folder,job.id)
+                    generated_count+=len(image_candidates[ps.id])
+                timings['image_generation']=round(time.monotonic()-image_started,3);timings['generated_image_count']=generated_count
             plan=enrich_logic_contracts(enrich_plan(enrich_logic_contracts(plan),content))
             write_json(folder/'plan.json',plan.model_dump());scenes=build_scenes(design,content,plan,job.id)
         else:
