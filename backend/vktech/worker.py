@@ -13,6 +13,10 @@ log=logging.getLogger(__name__)
 
 def execute(store,job,gateway=None):
     stopped=threading.Event()
+    def finish(**values):
+        try:store.owned_update(job.id,job.lease_owner,**values,lease_until=0)
+        except RuntimeError:
+            log.info('Job %s was cancelled or its lease was lost; result discarded',job.id)
     def heartbeat():
         while not stopped.wait(8):
             try:store.owned_update(job.id,job.lease_owner,lease_until=time.time()+30)
@@ -20,14 +24,13 @@ def execute(store,job,gateway=None):
     thread=threading.Thread(target=heartbeat,daemon=True);thread.start()
     try:
         result=Pipeline(store,gateway).run(job)
-        store.owned_update(job.id,job.lease_owner,state='ready',stage='ready',result=json.dumps(result,ensure_ascii=False),lease_until=0)
+        finish(state='ready',stage='ready',result=json.dumps(result,ensure_ascii=False))
     except (ModelUnavailable,NeedsInput) as exc:
-        store.owned_update(job.id,job.lease_owner,state='awaiting_input',stage='awaiting_input',error=str(exc),lease_until=0)
+        finish(state='awaiting_input',stage='awaiting_input',error=str(exc))
     except Exception as exc:
         # Response bodies and credentials never enter the public error message.
         log.exception('Job %s failed',job.id)
-        try:store.owned_update(job.id,job.lease_owner,state='failed',stage='failed',error=f'{type(exc).__name__}: {str(exc)[:300]}',lease_until=0)
-        except RuntimeError:pass
+        finish(state='failed',stage='failed',error=f'{type(exc).__name__}: {str(exc)[:300]}')
     finally:stopped.set();thread.join(timeout=1)
 
 

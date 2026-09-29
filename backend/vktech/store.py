@@ -118,15 +118,23 @@ class Store:
         with self.session() as s:
             j=s.get(Job,jid)
             if j is None:raise KeyError(jid)
-            if j.state in {'queued','running','awaiting_input'}:j.state='cancelled';j.updated=time.time()
+            # Compare-and-set: a late cancel must not hide a completed result.
+            s.execute(update(Job).where(Job.id==jid,Job.state.in_(
+                ['queued','running','awaiting_input','cancelled'])).values(
+                    state='cancelled',stage='cancelled',lease_owner=None,
+                    lease_until=0,updated=time.time()))
 
     def retry(self,jid):
         with self.session() as s:
             j=s.get(Job,jid)
             if j is None:raise KeyError(jid)
-            if j.state not in {'failed','awaiting_input'}:raise ValueError('Only failed or awaiting_input jobs can be retried')
+            if j.state not in {'failed','awaiting_input','cancelled'}:raise ValueError('Only failed, awaiting_input or cancelled jobs can be retried')
             j.state='queued';j.stage='queued';j.error='';j.lease_owner=None;j.lease_until=0;j.updated=time.time()
 
 
 def job_document(job):
-    return {'id':job.id,'kind':job.kind,'state':job.state,'stage':job.stage,'error':job.error,'created':job.created,'updated':job.updated,'attempts':job.attempts,'result':json.loads(job.result)}
+    # Older cancelled records retain their last active stage. Normalize them at
+    # the API boundary without rewriting history or deleting generated files.
+    stage=job.state if job.state in {'ready','failed','awaiting_input','cancelled'} else job.stage
+    parent=json.loads(job.payload).get('parent_job_id')
+    return {'id':job.id,'kind':job.kind,'state':job.state,'stage':stage,'parent_job_id':parent,'error':job.error,'created':job.created,'updated':job.updated,'attempts':job.attempts,'result':json.loads(job.result)}

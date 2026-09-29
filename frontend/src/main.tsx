@@ -13,7 +13,7 @@ type SlideLogicContract={teaching_goal:string;question_answered:string;main_asse
 type LogicFinding={rule:string;severity:'error'|'warning'|'info';message:string;repair_level:string};
 type SlideChoice={id:string;title:string;archetype:string;lead:string;support_points:string[];takeaway:string;visual_strategy?:string;visual_score?:number;visual_reason?:string;visual_contract?:VisualContract;logic_contract?:SlideLogicContract;logic_status?:'ok'|'review';logic_findings?:LogicFinding[];image_candidates?:ImageCandidate[];selected:Variant;options:Record<Variant,Option>};
 type Result={request?:{template_id:string;content_id:string};presentation?:Export;variants?:Record<string,Export>;slides?:SlideChoice[];selection?:Record<string,string>;logic_findings?:LogicFinding[];palette?:Palette;source_palette?:Palette;elapsed_seconds?:number;deadline_met?:boolean};
-type Job={id:string;state:string;stage:string;error:string;result:Result};
+type Job={id:string;state:string;stage:string;parent_job_id?:string|null;error:string;result:Result};
 type Template={id:string;name:string;design:{prototypes:unknown[];fonts:string[];warnings:string[]}};
 type Content={id:string;name:string;content:{claims:unknown[];datasets:unknown[]}};
 type Health={model_configured:boolean;image_model_configured:boolean;renderer_available:boolean};
@@ -55,19 +55,24 @@ function App(){
     const id=new URLSearchParams(window.location.search).get('job')||localStorage.getItem('vktech-job');if(id)api<Job>('/api/jobs/'+id).then(setJob).catch(()=>localStorage.removeItem('vktech-job'));
   },[]);
   useEffect(()=>{
-    if(!job||!['queued','running'].includes(job.state))return;
-    const timer=setInterval(()=>api<Job>('/api/jobs/'+job.id).then(next=>{setJob(next);if(!['queued','running'].includes(next.state))setBusy(false)}).catch(e=>{setError(e.message);setBusy(false)}),1500);
-    return()=>clearInterval(timer);
+    if(!job||!['queued','running'].includes(job.state)){setBusy(false);return}
+    let active=true;
+    const timer=setInterval(()=>api<Job>('/api/jobs/'+job.id).then(next=>{
+      if(!active)return;
+      // A poll started before cancellation/navigation must not restore the old job.
+      setJob(current=>current?.id===job.id&&['queued','running'].includes(current.state)?next:current);
+    }).catch(e=>{if(active)setError(e.message)}),1500);
+    return()=>{active=false;clearInterval(timer)};
   },[job?.id,job?.state]);
   useEffect(()=>{
     if(!job)return;localStorage.setItem('vktech-job',job.id);
+    const url=new URL(window.location.href);url.searchParams.set('job',job.id);window.history.replaceState({},'',url);
     if(job.state==='ready'&&job.result.selection){
       setDraftSelection(job.result.selection as Record<string,Variant>);
       if(job.result.request?.template_id)setTemplate(job.result.request.template_id);
       if(job.result.request?.content_id)setContent(job.result.request.content_id);
       const next=normalizePalette(job.result.palette||job.result.source_palette);setPalette(next);setAppliedPalette(next);setSourcePalette(normalizePalette(job.result.source_palette||next));
       setSlide(current=>Math.min(current,(job.result.slides?.length||1)-1));
-      const url=new URL(window.location.href);url.searchParams.set('job',job.id);window.history.replaceState({},'',url);
     }
   },[job?.id,job?.state]);
   useEffect(()=>{
@@ -89,6 +94,23 @@ function App(){
   async function recompose(){
     if(!job)return;setBusy(true);setError('');
     try{const created=await api<{id:string}>(`/api/jobs/${job.id}/recompose`,{method:'POST'});setJob(await api<Job>('/api/jobs/'+created.id))}catch(e){setError((e as Error).message);setBusy(false)}
+  }
+  async function cancelJob(){
+    if(!job)return;const id=job.id;setError('');
+    try{const next=await api<Job>(`/api/jobs/${id}/cancel`,{method:'POST'});setJob(current=>current?.id===id?next:current);setBusy(false)}catch(e){setError((e as Error).message)}
+  }
+  async function retryJob(){
+    if(!job)return;setBusy(true);setError('');
+    try{setJob(await api<Job>(`/api/jobs/${job.id}/retry`,{method:'POST'}))}catch(e){setError((e as Error).message);setBusy(false)}
+  }
+  async function returnToPresentation(){
+    if(!job?.parent_job_id)return;setBusy(true);setError('');
+    try{const parent=await api<Job>('/api/jobs/'+job.parent_job_id);if(parent.state!=='ready')throw new Error('Предыдущая версия пока недоступна');setExportTask(null);setJob(parent)}catch(e){setError((e as Error).message)}finally{setBusy(false)}
+  }
+  function clearJob(){
+    setJob(null);setBusy(false);setExportTask(null);setError('');setDraftSelection({});setSlide(0);
+    localStorage.removeItem('vktech-job');
+    const url=new URL(window.location.href);url.searchParams.delete('job');window.history.replaceState({},'',url);
   }
   async function download(format:Format){
     if(!job||!presentation)return;setError('');
@@ -137,8 +159,14 @@ function App(){
         {error&&<div role="alert" className="error">{error}<button onClick={()=>setError('')}>×</button></div>}
         {!job&&<div className="empty"><div className="empty-card"><div className="mock-title"/><div className="mock-line"/><div className="mock-line short"/><div className="mock-bars"><i/><i/><i/></div></div><h2>Здесь появится презентация</h2></div>}
         {job&&<>
-          <div className="status"><span className={'dot '+job.state}/><b>{stages[job.stage]||job.stage}</b>{['queued','running'].includes(job.state)&&<button onClick={()=>api<Job>(`/api/jobs/${job.id}/cancel`,{method:'POST'}).then(setJob).catch(e=>setError(e.message))}>Отменить</button>}</div>
-          {job.error&&<div className="error">{job.error}</div>}{['failed','awaiting_input'].includes(job.state)&&<button onClick={()=>api<Job>(`/api/jobs/${job.id}/retry`,{method:'POST'}).then(setJob).catch(e=>setError(e.message))}>Повторить после устранения причины</button>}
+          <div className="status"><span className={'dot '+job.state}/><b>{stages[['queued','running'].includes(job.state)?job.stage:job.state]||job.state}</b>{['queued','running'].includes(job.state)&&<button onClick={cancelJob}>Отменить</button>}</div>
+          {job.error&&<div className="error">{job.error}</div>}
+          {['failed','awaiting_input','cancelled'].includes(job.state)&&<div className="notice-card">
+            {job.state==='cancelled'&&<p>Действие отменено. Загруженные материалы и предыдущая версия презентации сохранены.</p>}
+            {job.parent_job_id&&<button disabled={busy} onClick={returnToPresentation}>Вернуться к презентации</button>}
+            <button disabled={busy} onClick={retryJob}>{job.state==='cancelled'?'Повторить действие':'Повторить после устранения причины'}</button>
+            <button disabled={busy} onClick={clearJob}>Новое задание</button>
+          </div>}
           {legacyReady&&<div className="notice-card">Этот результат создан старой версией сервиса. Нажмите «Создать презентацию», чтобы получить выбор вариантов для каждого слайда.</div>}
           {job.state==='ready'&&presentation&&currentChoice&&<>
             <div className="result-head"><div className="exports">{(['pptx','pdf','html'] as const).map(format=><button key={format} disabled={Boolean(exportTask)||paletteDirty} onClick={()=>download(format)}>{exportTask?.format===format?'Сборка…':format.toUpperCase()+' ↓'}</button>)}</div></div>
